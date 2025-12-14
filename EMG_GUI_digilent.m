@@ -450,7 +450,9 @@ function filtered = filterEMG(raw)
     f0 = 60;
     Q = 2;
     wo = f0/(Fs/2); bw = wo/Q;
-    [b,a] = iirnotch(wo, bw);
+
+    [b,a] = designNotchPeakIIR('Response','notch','CenterFrequency',f0, ...
+        'QualityFactor',Q,'SampleRate',Fs);
     emg_notch = filtfilt(b,a, raw);
 
     [b,a] = butter(4, [20 400]/(Fs/2), 'bandpass');
