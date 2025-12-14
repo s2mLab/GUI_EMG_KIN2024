@@ -1,9 +1,8 @@
 function EMG_GUI_digilent()
     % Digilent / MCC (USB-1208FS-PLUS) EMG GUI for real-time acquisition and display (2 channels)
     %
-    % Confirmed setup: USB-1208FS-PLUS, 2 channels (AI0 & AI1) wired in DIFFERENTIAL:
-    %   EMG1: AI0+ (signal) / AI0- (Grass GND)
-    %   EMG2: AI1+ (signal) / AI1- (Grass GND)
+    % 2-channel pairing via ONE popup:
+    %   - AI0-1, AI1-2, AI2-3, AI3-4, AI4-5, AI5-6, AI6-7
     %
     % Requirements:
     %   - MCC Universal Library installed + MATLAB interface on path
@@ -22,36 +21,31 @@ function EMG_GUI_digilent()
         'Units','normalized','Position',[0.58,0.94,0.4,0.04], ...
         'FontSize',12,'HorizontalAlignment','left','ForegroundColor',[0 0 0]);
 
-    %% Channel choosers + (Re)connect
-    devList = arrayfun(@(k) sprintf('AI%d',k), 0:7, 'UniformOutput', false);
-    uicontrol(f,'Style','text','String','EMG1 canal:', ...
+    %% ONE popup: channel pair selector + (Re)connect
+    pairList = arrayfun(@(k) sprintf('AI%d-%d',k,k+1), 0:6, 'UniformOutput', false);
+    uicontrol(f,'Style','text','String','Paire EMG:', ...
         'Units','normalized','Position',[0.05,0.905,0.08,0.035],'HorizontalAlignment','left');
-    popupDev1 = uicontrol(f,'Style','popupmenu','String',devList, ...
-        'Units','normalized','Position',[0.13,0.9,0.08,0.045], 'FontSize',11, 'Value',1); % AI0
-
-    uicontrol(f,'Style','text','String','EMG2 canal:', ...
-        'Units','normalized','Position',[0.22,0.905,0.08,0.035],'HorizontalAlignment','left');
-    popupDev2 = uicontrol(f,'Style','popupmenu','String',devList, ...
-        'Units','normalized','Position',[0.30,0.9,0.08,0.045], 'FontSize',11, 'Value',2); % AI1
+    popupPair = uicontrol(f,'Style','popupmenu','String',pairList, ...
+        'Units','normalized','Position',[0.13,0.9,0.10,0.045], 'FontSize',11, 'Value',1); % AI0-1
 
     btnReconnect = uicontrol(f,'Style','pushbutton','String','(Re)connecter', ...
-        'Units','normalized','Position',[0.40,0.9,0.12,0.05],'FontSize',11, ...
+        'Units','normalized','Position',[0.25,0.9,0.12,0.05],'FontSize',11, ...
         'Callback',@(~,~) connectDAQ());
 
     %% Axes (2x2 grid): raw1, raw2, filt1, filt2
     ax_raw1 = axes(f,'Units','normalized','Position',[0.07,0.58,0.40,0.30]); hold(ax_raw1,'on');
-    title(ax_raw1,'EMG1 brut'); xlabel(ax_raw1,'Échantillon'); ylabel(ax_raw1,'Amplitude');
+    title(ax_raw1,'EMG1 brut'); xlabel(ax_raw1,'Temps (s)'); ylabel(ax_raw1,'Activité (V)');
     hLine_raw1 = plot(ax_raw1,nan,nan,'-');
 
     ax_raw2 = axes(f,'Units','normalized','Position',[0.53,0.58,0.40,0.30]); hold(ax_raw2,'on');
-    title(ax_raw2,'EMG2 brut'); xlabel(ax_raw2,'Échantillon'); ylabel(ax_raw2,'Amplitude');
+    title(ax_raw2,'EMG2 brut'); xlabel(ax_raw2,'Temps (s)'); ylabel(ax_raw2,'Activité (V)');
     hLine_raw2 = plot(ax_raw2,nan,nan,'-');
 
     ax_filt1 = axes(f,'Units','normalized','Position',[0.07,0.15,0.40,0.30]); hold(ax_filt1,'on');
-    title(ax_filt1,'EMG1 filtré (normalisé)'); xlabel(ax_filt1,'Échantillon'); ylabel(ax_filt1,'Amplitude');
+    title(ax_filt1,'EMG1 filtré (normalisé)'); xlabel(ax_filt1,'Temps (s)'); ylabel(ax_filt1,'(%MVC)');
 
     ax_filt2 = axes(f,'Units','normalized','Position',[0.53,0.15,0.40,0.30]); hold(ax_filt2,'on');
-    title(ax_filt2,'EMG2 filtré (normalisé)'); xlabel(ax_filt2,'Échantillon'); ylabel(ax_filt2,'Amplitude');
+    title(ax_filt2,'EMG2 filtré (normalisé)'); xlabel(ax_filt2,'Temps (s)'); ylabel(ax_filt2,'(%MVC)');
 
     %% Controls
     btnStart = uicontrol(f,'Style','togglebutton','String','Commencer l''enregistrement', ...
@@ -65,17 +59,15 @@ function EMG_GUI_digilent()
         'Units','normalized','Position',[0.85,0.9,0.08,0.05],'FontSize',12, ...
         'Callback',@(~,~) measureMVC(f,mvcTxt,2));
 
+    % Export button moved to bottom
     uicontrol(f,'Style','pushbutton','String','Exporter les graphiques', ...
-        'Units','normalized','Position',[0.83,0.84,0.15,0.05],'FontSize',12, ...
+        'Units','normalized','Position',[0.80,0.02,0.18,0.06],'FontSize',12, ...
         'Callback',@(~,~) exportGraphs(ax_raw1,ax_raw2,ax_filt1,ax_filt2));
 
     %% MCC configuration (stored)
     boardNum = 0;
     setappdata(f,'boardNum',boardNum);
 
-    % Gain/range:
-    % - If your UL binding defines BIP10VOLTS, use that.
-    % - Otherwise, keep gain=1 (common mapping for ±10 V in several MATLAB UL bindings).
     gain = 1;
     try
         if exist('BIP10VOLTS','var') %#ok<EXIST>
@@ -85,13 +77,10 @@ function EMG_GUI_digilent()
     end
     setappdata(f,'gain',gain);
 
-    % Sampling
     Fs = 2000;
     setappdata(f,'Fs',Fs);
 
-    % Store shared GUI objects
-    setappdata(f,'popupDev1',popupDev1);
-    setappdata(f,'popupDev2',popupDev2);
+    setappdata(f,'popupPair',popupPair);
 
     setappdata(f,'ax_raw1',ax_raw1);
     setappdata(f,'ax_raw2',ax_raw2);
@@ -116,7 +105,6 @@ function EMG_GUI_digilent()
     %% Nested: (Re)connect
     function connectDAQ()
         try
-            % Stop any live timer
             t = getappdata(f,'liveTimer');
             if ~isempty(t) && isa(t,'timer') && isvalid(t)
                 try stop(t); catch, end
@@ -124,18 +112,19 @@ function EMG_GUI_digilent()
             end
             setappdata(f,'liveTimer',[]);
 
-            % MCC error handling: no dialogs
             try cbErrHandling(0,0); catch, end
 
             boardNum = getappdata(f,'boardNum');
             gain     = getappdata(f,'gain');
 
-            ch1 = get(getappdata(f,'popupDev1'),'Value') - 1; % AI#
-            ch2 = get(getappdata(f,'popupDev2'),'Value') - 1; % AI#
+            % Pair selection -> channels
+            pairIdx = get(getappdata(f,'popupPair'),'Value'); % 1..7 => AI0-1..AI6-7
+            ch1 = pairIdx - 1;
+            ch2 = ch1 + 1;
+
             setappdata(f,'chanNum1',ch1);
             setappdata(f,'chanNum2',ch2);
 
-            % Ping reads to validate
             [err1, ~] = cbAIn(boardNum, ch1, gain);
             [err2, ~] = cbAIn(boardNum, ch2, gain);
             if err1 ~= 0 || err2 ~= 0
@@ -177,23 +166,21 @@ function startStopDAQ(src,statusTxt)
     chunkPts  = 200;      % ~0.1 s at 2kHz
 
     if src.Value
-        % --- START ---
         setappdata(fig,'rawBuf',[]);
         setappdata(fig,'sampleIdx',0);
         src.String = 'Arrêter l''enregistrement';
 
-        cla(ax_raw1); hold(ax_raw1,'on'); title(ax_raw1,'EMG1 brut');
-        cla(ax_raw2); hold(ax_raw2,'on'); title(ax_raw2,'EMG2 brut');
-        cla(ax_filt1); title(ax_filt1,'EMG1 filtré (normalisé)');
-        cla(ax_filt2); title(ax_filt2,'EMG2 filtré (normalisé)');
+        cla(ax_raw1); hold(ax_raw1,'on'); title(ax_raw1,'EMG1 brut'); xlabel(ax_raw1,'Temps (s)'); ylabel(ax_raw1,'Activité (V)');
+        cla(ax_raw2); hold(ax_raw2,'on'); title(ax_raw2,'EMG2 brut'); xlabel(ax_raw2,'Temps (s)'); ylabel(ax_raw2,'Activité (V)');
+        cla(ax_filt1); title(ax_filt1,'EMG1 filtré (normalisé)'); xlabel(ax_filt1,'Temps (s)'); ylabel(ax_filt1,'(%MVC)');
+        cla(ax_filt2); title(ax_filt2,'EMG2 filtré (normalisé)'); xlabel(ax_filt2,'Temps (s)'); ylabel(ax_filt2,'(%MVC)');
 
         hLine1 = plot(ax_raw1,nan,nan,'-'); setappdata(fig,'hLine_raw1',hLine1);
         hLine2 = plot(ax_raw2,nan,nan,'-'); setappdata(fig,'hLine_raw2',hLine2);
 
-        set(ax_raw1,'XLim',[0, windowPts]);
-        set(ax_raw2,'XLim',[0, windowPts]);
+        set(ax_raw1,'XLim',[0, 5]);
+        set(ax_raw2,'XLim',[0, 5]);
 
-        % Timer acquisition (reads each channel separately => no "contiguous channels" constraint)
         t = timer('ExecutionMode','fixedSpacing', ...
                   'Period', chunkPts/Fs, ...
                   'TimerFcn', @processLiveTick, ...
@@ -202,7 +189,6 @@ function startStopDAQ(src,statusTxt)
         start(t);
 
     else
-        % --- STOP ---
         src.String = 'Commencer l''enregistrement';
 
         t = getappdata(fig,'liveTimer');
@@ -223,15 +209,17 @@ function startStopDAQ(src,statusTxt)
 
             mvc = getappdata(fig,'mvc_values');
             if ~isempty(mvc)
-                if numel(mvc)>=1 && mvc(1)>0, filt1 = filt1 / mvc(1); end
-                if numel(mvc)>=2 && mvc(2)>0, filt2 = filt2 / mvc(2); end
+                if numel(mvc)>=1 && mvc(1)>0, filt1 = 100 * (filt1 / mvc(1)); end
+                if numel(mvc)>=2 && mvc(2)>0, filt2 = 100 * (filt2 / mvc(2)); end
             end
 
-            cla(ax_filt1); plot(ax_filt1,filt1);
-            title(ax_filt1,'EMG1 filtré (normalisé)'); xlabel(ax_filt1,'Échantillon'); ylabel(ax_filt1,'Amplitude');
+            tsec = (0:numel(filt1)-1)/Fs;
 
-            cla(ax_filt2); plot(ax_filt2,filt2);
-            title(ax_filt2,'EMG2 filtré (normalisé)'); xlabel(ax_filt2,'Échantillon'); ylabel(ax_filt2,'Amplitude');
+            cla(ax_filt1); plot(ax_filt1,tsec,filt1);
+            title(ax_filt1,'EMG1 filtré (normalisé)'); xlabel(ax_filt1,'Temps (s)'); ylabel(ax_filt1,'(%MVC)');
+
+            cla(ax_filt2); plot(ax_filt2,tsec,filt2);
+            title(ax_filt2,'EMG2 filtré (normalisé)'); xlabel(ax_filt2,'Temps (s)'); ylabel(ax_filt2,'(%MVC)');
 
             rec_count = getappdata(fig,'rec_count');
             rec_count = rec_count + 1;
@@ -264,10 +252,7 @@ function startStopDAQ(src,statusTxt)
         rawBuf    = getappdata(fig,'rawBuf');
         sampleIdx = getappdata(fig,'sampleIdx');
 
-        % Acquire chunkPts samples for CH1
         v1 = acquireOneChannel(boardNum, ch1, gain, Fs, chunkPts);
-
-        % Acquire chunkPts samples for CH2
         v2 = acquireOneChannel(boardNum, ch2, gain, Fs, chunkPts);
 
         volts = [v1(:), v2(:)];
@@ -279,12 +264,15 @@ function startStopDAQ(src,statusTxt)
         sampleIdx = sampleIdx + N;
         setappdata(fig,'sampleIdx',sampleIdx);
 
-        if sampleIdx <= windowPts
-            idx = 1:sampleIdx;
+        % Time window indices
+        totalPts = sampleIdx;
+        if totalPts <= windowPts
+            idx = 1:totalPts;
         else
-            idx = (sampleIdx-windowPts+1):sampleIdx;
+            idx = (totalPts-windowPts+1):totalPts;
         end
 
+        tsec = (idx-idx(1))/Fs; % 0..5s window
         ch1win = rawBuf(idx,1);
         ch2win = rawBuf(idx,2);
 
@@ -292,15 +280,15 @@ function startStopDAQ(src,statusTxt)
         active2 = (std(double(ch2win)) > 1e-6) || (max(abs(ch2win)) > 1e-5);
 
         if active1
-            set(hLine1,'XData',idx,'YData',ch1win);
-            set(ax_raw1,'XLim',[max(1,sampleIdx-windowPts+1), sampleIdx]);
+            set(hLine1,'XData',tsec,'YData',ch1win);
+            set(ax_raw1,'XLim',[0, 5]);
         else
             set(hLine1,'XData',nan,'YData',nan);
         end
 
         if active2
-            set(hLine2,'XData',idx,'YData',ch2win);
-            set(ax_raw2,'XLim',[max(1,sampleIdx-windowPts+1), sampleIdx]);
+            set(hLine2,'XData',tsec,'YData',ch2win);
+            set(ax_raw2,'XLim',[0, 5]);
         else
             set(hLine2,'XData',nan,'YData',nan);
         end
@@ -315,7 +303,6 @@ function startStopDAQ(src,statusTxt)
 end
 
 function v = acquireOneChannel(boardNum, physCh, gain, Fs, nPts)
-    % Acquire one channel using cbAInScan (blocking), return volts (exact if cbToEngUnits exists).
     try cbErrHandling(0,0); catch, end
 
     memHandle = cbWinBufAlloc(nPts);
@@ -335,13 +322,12 @@ function v = acquireOneChannel(boardNum, physCh, gain, Fs, nPts)
 
         rawCounts = double(rawCounts(:));
 
-        % Exact conversion if available
+        % Exact conversion if available (slower but correct)
         if exist('cbToEngUnits','file') == 2
             v = zeros(size(rawCounts));
             for i = 1:numel(rawCounts)
                 [err2, eng] = cbToEngUnits(boardNum, gain, rawCounts(i));
                 if err2 ~= 0
-                    % fallback approximate
                     v(i) = (rawCounts(i) - 2048) / 2048 * 10;
                 else
                     v(i) = eng;
@@ -359,13 +345,10 @@ function v = acquireOneChannel(boardNum, physCh, gain, Fs, nPts)
 end
 
 function measureMVC(figHandle,mvcTxt,chIdx)
-    % Measure MVC for a SINGLE selected channel (5 s). Blocking acquisition then plots.
-
     boardNum = getappdata(figHandle,'boardNum');
     gain     = getappdata(figHandle,'gain');
     Fs       = getappdata(figHandle,'Fs');
 
-    % Stop any live timer
     t = getappdata(figHandle,'liveTimer');
     if ~isempty(t) && isa(t,'timer') && isvalid(t)
         try stop(t); catch, end
@@ -383,10 +366,10 @@ function measureMVC(figHandle,mvcTxt,chIdx)
 
     mvc = getappdata(figHandle,'mvc_values'); if isempty(mvc), mvc = [0 0]; end
     if mvc(chIdx) > 0
-        cla(ax_raw1);  title(ax_raw1,'EMG1 brut');  xlabel(ax_raw1,'Échantillon'); ylabel(ax_raw1,'Amplitude'); hold(ax_raw1,'on');
-        cla(ax_raw2);  title(ax_raw2,'EMG2 brut');  xlabel(ax_raw2,'Échantillon'); ylabel(ax_raw2,'Amplitude'); hold(ax_raw2,'on');
-        cla(ax_filt1); title(ax_filt1,'EMG1 filtré (normalisé)'); xlabel(ax_filt1,'Échantillon'); ylabel(ax_filt1,'Amplitude'); hold(ax_filt1,'on');
-        cla(ax_filt2); title(ax_filt2,'EMG2 filtré (normalisé)'); xlabel(ax_filt2,'Échantillon'); ylabel(ax_filt2,'Amplitude'); hold(ax_filt2,'on');
+        cla(ax_raw1);  title(ax_raw1,'EMG1 brut');  xlabel(ax_raw1,'Temps (s)'); ylabel(ax_raw1,'Activité (V)'); hold(ax_raw1,'on');
+        cla(ax_raw2);  title(ax_raw2,'EMG2 brut');  xlabel(ax_raw2,'Temps (s)'); ylabel(ax_raw2,'Activité (V)'); hold(ax_raw2,'on');
+        cla(ax_filt1); title(ax_filt1,'EMG1 filtré (normalisé)'); xlabel(ax_filt1,'Temps (s)'); ylabel(ax_filt1,'(%MVC)'); hold(ax_filt1,'on');
+        cla(ax_filt2); title(ax_filt2,'EMG2 filtré (normalisé)'); xlabel(ax_filt2,'Temps (s)'); ylabel(ax_filt2,'(%MVC)'); hold(ax_filt2,'on');
         setappdata(figHandle,'mvc_waveforms',struct('raw1',[],'raw2',[],'env1',[],'env2',[]));
     end
 
@@ -403,17 +386,19 @@ function measureMVC(figHandle,mvcTxt,chIdx)
 
     buf = acquireOneChannel(boardNum, physCh, gain, Fs, nPts);
 
+    tsec = (0:numel(buf)-1)/Fs;
+
     cla(targetRaw);  hold(targetRaw,'on');
     cla(targetFilt); hold(targetFilt,'on');
     title(targetRaw, sprintf('EMG%d MVC (%ds)', side, durSec));
-    xlabel(targetRaw,'Échantillon'); ylabel(targetRaw,'Amplitude');
+    xlabel(targetRaw,'Temps (s)'); ylabel(targetRaw,'Activité (V)');
     title(targetFilt, sprintf('EMG%d enveloppe MVC', side));
-    xlabel(targetFilt,'Échantillon'); ylabel(targetFilt,'Amplitude');
+    xlabel(targetFilt,'Temps (s)'); ylabel(targetFilt,'(%MVC)');
 
-    plot(targetRaw, buf, '-');
+    plot(targetRaw, tsec, buf, '-');
 
     envFull = sqrt(movmean((buf - mean(buf)).^2, 100));
-    plot(targetFilt, envFull, '-');
+    plot(targetFilt, tsec, envFull, '-');
 
     nTake = min(2000, numel(buf));
     topVals = maxk(abs(buf), nTake);
@@ -422,14 +407,6 @@ function measureMVC(figHandle,mvcTxt,chIdx)
     mvcLoc = getappdata(figHandle,'mvc_values'); if isempty(mvcLoc), mvcLoc = [0 0]; end
     mvcLoc(side) = mvcVal;
     setappdata(figHandle,'mvc_values', mvcLoc);
-
-    wf = getappdata(figHandle,'mvc_waveforms');
-    if side==1
-        wf.raw1 = buf;  wf.env1 = envFull;
-    else
-        wf.raw2 = buf;  wf.env2 = envFull;
-    end
-    setappdata(figHandle,'mvc_waveforms',wf);
 
     set(mvcTxt,'String',sprintf('MVC1 = %.2f | MVC2 = %.2f',mvcLoc(1),mvcLoc(2)));
 
@@ -448,15 +425,14 @@ function filtered = filterEMG(raw)
 
     Fs = 2000;
     f0 = 60;
-    Q = 2;
-    wo = f0/(Fs/2); bw = wo/Q;
+    Q  = 2;
 
-    [b,a] = designNotchPeakIIR('Response','notch','CenterFrequency',f0, ...
-        'QualityFactor',Q,'SampleRate',Fs);
+    [b,a] = designNotchPeakIIR('Response','notch','CenterFrequency',f0,'QualityFactor',Q,'SampleRate',Fs);
     emg_notch = filtfilt(b,a, raw);
 
     [b,a] = butter(4, [20 400]/(Fs/2), 'bandpass');
     emg = filtfilt(b,a,emg_notch);
+
     filtered = sqrt(movmean(emg.^2,100));
 end
 
@@ -464,19 +440,19 @@ function exportGraphs(ax_raw1,ax_raw2,ax_filt1,ax_filt2)
     fig = figure('Visible','off','Position',[100,100,1200,800]);
     subplot(2,2,1);
     copyobj(allchild(ax_raw1), gca);
-    title('EMG1 brut'); xlabel('Échantillon'); ylabel('Amplitude');
+    title('EMG1 brut'); xlabel('Temps (s)'); ylabel('Activité (V)');
 
     subplot(2,2,2);
     copyobj(allchild(ax_raw2), gca);
-    title('EMG2 brut'); xlabel('Échantillon'); ylabel('Amplitude');
+    title('EMG2 brut'); xlabel('Temps (s)'); ylabel('Activité (V)');
 
     subplot(2,2,3);
     copyobj(allchild(ax_filt1), gca);
-    title('EMG1 filtré (normalisé)'); xlabel('Échantillon'); ylabel('Amplitude');
+    title('EMG1 filtré (normalisé)'); xlabel('Temps (s)'); ylabel('(%MVC)');
 
     subplot(2,2,4);
     copyobj(allchild(ax_filt2), gca);
-    title('EMG2 filtré (normalisé)'); xlabel('Échantillon'); ylabel('Amplitude');
+    title('EMG2 filtré (normalisé)'); xlabel('Temps (s)'); ylabel('(%MVC)');
 
     [file,path] = uiputfile('*.png','Exporter les graphiques sous...');
     if ~isequal(file,0)
