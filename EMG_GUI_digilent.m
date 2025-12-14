@@ -1,12 +1,17 @@
 function EMG_GUI_digilent()
-    % NI DAQ EMG GUI for real-time data acquisition and display (2 channels)
+    % Digilent / MCC (USB-1208FS-PLUS) EMG GUI for real-time data acquisition and display (2 channels)
+    %
+    % IMPORTANT:
+    % - This version uses Measurement Computing (MCC) Universal Library (UL) functions:
+    %   cbAIn, cbAInScan, cbWinBufAlloc, cbWinBufToArray, cbWinBufFree, cbErrHandling, cbStopBackground
+    % - Make sure the MCC UL is installed and its MATLAB interface is on the MATLAB path.
 
     % Create the GUI
-    f = figure('Name','NI DAQ EMG Acquisition','NumberTitle','off', ...
+    f = figure('Name','DAQ EMG Acquisition','NumberTitle','off', ...
                'Position',[100,100,900,700],'Units','normalized');
 
     %% Status & MVC text
-    statusTxt = uicontrol(f,'Style','text','String','Connexion à NI DAQ...', ...
+    statusTxt = uicontrol(f,'Style','text','String','Connexion à Digilent/MCC...', ...
         'Units','normalized','Position',[0.05,0.94,0.5,0.04], ...
         'FontSize',12,'HorizontalAlignment','left');
     mvcTxt = uicontrol(f,'Style','text','String','', ...
@@ -14,16 +19,17 @@ function EMG_GUI_digilent()
         'FontSize',12,'HorizontalAlignment','left','ForegroundColor',[0 0 0]);
 
     %% Channel choosers (act as "spot" selectors) + (Re)connect
-    devList = arrayfun(@(k) sprintf('Dev%d',k), 1:9, 'UniformOutput', false); % labels kept
+    % (Keep variable names; these are now AI channel selectors.)
+    devList = arrayfun(@(k) sprintf('AI%d',k), 0:7, 'UniformOutput', false); % USB-1208FS-PLUS typical AI0..AI7
     uicontrol(f,'Style','text','String','EMG1 canal:', ...
         'Units','normalized','Position',[0.05,0.905,0.08,0.035],'HorizontalAlignment','left');
     popupDev1 = uicontrol(f,'Style','popupmenu','String',devList, ...
-        'Units','normalized','Position',[0.13,0.9,0.08,0.045], 'FontSize',11);
+        'Units','normalized','Position',[0.13,0.9,0.08,0.045], 'FontSize',11, 'Value',1); % AI0
 
     uicontrol(f,'Style','text','String','EMG2 canal:', ...
         'Units','normalized','Position',[0.22,0.905,0.08,0.035],'HorizontalAlignment','left');
     popupDev2 = uicontrol(f,'Style','popupmenu','String',devList, ...
-        'Units','normalized','Position',[0.30,0.9,0.08,0.045], 'FontSize',11, 'Value',2);
+        'Units','normalized','Position',[0.30,0.9,0.08,0.045], 'FontSize',11, 'Value',2); % AI1
 
     btnReconnect = uicontrol(f,'Style','pushbutton','String','(Re)connecter', ...
         'Units','normalized','Position',[0.40,0.9,0.12,0.05],'FontSize',11, ...
@@ -61,21 +67,23 @@ function EMG_GUI_digilent()
         'Units','normalized','Position',[0.83,0.84,0.15,0.05],'FontSize',12, ...
         'Callback',@(~,~) exportGraphs(ax_raw1,ax_raw2,ax_filt1,ax_filt2));
 
-    %% Detect an NI device once; channel(s) are chosen from popups
-    try
-        daqreset();
-        devs = daq.getDevices();
-        if ~isempty(devs)
-            deviceID = char(devs(1).ID);   % e.g., 'Dev1' or 'cDAQ1Mod1'
-        else
-            deviceID = 'Dev1';             % fallback
-        end
-    catch
-        deviceID = 'Dev1';
-    end
+    %% MCC/Digilent configuration stored in appdata (keep naming style)
+    % MCC board number (usually 0 for first device)
+    boardNum = 0;
+    setappdata(f,'boardNum',boardNum);
+
+    % Gain / range:
+    % In MCC UL, "gain" is typically a constant like BIP10VOLTS.
+    % In some MATLAB setups those constants are not defined; many examples use numeric codes.
+    % If your installation defines BIP10VOLTS, replace "gain = 1;" with "gain = BIP10VOLTS;"
+    gain = 1;  % commonly corresponds to ±10V in many MCC UL MATLAB bindings
+    setappdata(f,'gain',gain);
+
+    % Sampling
+    Fs = 2000;
+    setappdata(f,'Fs',Fs);
 
     % Store shared items
-    setappdata(f,'deviceID',deviceID);
     setappdata(f,'popupDev1',popupDev1);
     setappdata(f,'popupDev2',popupDev2);
 
@@ -96,55 +104,50 @@ function EMG_GUI_digilent()
     setappdata(f,'rec_count',0);
     setappdata(f,'recordings_raw',{}); % cell per recording
 
-    connectDAQ();  % initial connection using current popup selections
+    % Store timer handle for live acquisition
+    setappdata(f,'liveTimer',[]);
+    setappdata(f,'rawBuf',[]);
+    setappdata(f,'sampleIdx',0);
 
-    % Expose the reconnect function to outside (for MVC to rebuild dLive)
+    connectDAQ();  % initial connection using current popup selections
     setappdata(f,'connectFcn', @connectDAQ);
 
     %% Nested function: (Re)connect using current popup selections as CHANNELS
     function connectDAQ()
         try
-            % Clean up any previous live session
-            oldLive = getappdata(f,'dLive');
-            if ~isempty(oldLive) && isvalid(oldLive)
-                try stop(oldLive); catch, end
-                try release(oldLive); catch, end
+            % Stop any live timer
+            t = getappdata(f,'liveTimer');
+            if ~isempty(t) && isa(t,'timer') && isvalid(t)
+                try stop(t); catch, end
+                try delete(t); catch, end
             end
+            setappdata(f,'liveTimer',[]);
 
-            daqreset();
-            deviceID = getappdata(f,'deviceID');
-            ch1 = get(getappdata(f,'popupDev1'),'Value');  % 1..9
-            ch2 = get(getappdata(f,'popupDev2'),'Value');  % 1..9
+            % MCC error handling: avoid UL popping dialogs
+            try cbErrHandling(0,0); catch, end
+
+            boardNum = getappdata(f,'boardNum');
+            gain     = getappdata(f,'gain');
+
+            % Popups select AI channel number (0..7)
+            ch1 = get(getappdata(f,'popupDev1'),'Value') - 1; % AI0..AI7
+            ch2 = get(getappdata(f,'popupDev2'),'Value') - 1; % AI0..AI7
             setappdata(f,'chanNum1',ch1);
             setappdata(f,'chanNum2',ch2);
 
-            dLive = daq.createSession('ni');
-            dLive.Rate = 2000;
+            % Simple "ping" read to validate connection
+            [err1, ~] = cbAIn(boardNum, ch1, gain);
+            [err2, ~] = cbAIn(boardNum, ch2, gain);
 
-            % Try 1-based channels first, then 0-based fallback (covers NI variants)
-            try
-                dLive.addAnalogInputChannel(deviceID, ch1, 'Voltage');
-            catch
-                dLive.addAnalogInputChannel(deviceID, ch1-1, 'Voltage');
-            end
-            try
-                dLive.addAnalogInputChannel(deviceID, ch2, 'Voltage');
-            catch
-                dLive.addAnalogInputChannel(deviceID, ch2-1, 'Voltage');
+            if err1 ~= 0 || err2 ~= 0
+                error('MCC cbAIn error (err1=%d, err2=%d).', err1, err2);
             end
 
-            % Terminal config
-            for k=1:numel(dLive.Channels)
-                dLive.Channels(k).TerminalConfig = 'SingleEnded';
-            end
-            dLive.IsContinuous = true;
-
-            setappdata(f,'dLive',dLive);
-            set(statusTxt,'String',sprintf('NI DAQ connecté : %s | canaux [%d, %d]',deviceID,ch1,ch2), ...
+            set(statusTxt,'String',sprintf('Digilent/MCC connecté (board %d) | canaux [AI%d, AI%d]',boardNum,ch1,ch2), ...
                           'ForegroundColor','green');
 
         catch ME
-            set(statusTxt,'String','Échec de connexion NI DAQ','ForegroundColor','red');
+            set(statusTxt,'String','Échec de connexion Digilent/MCC','ForegroundColor','red');
             disp(getReport(ME,'extended'));
         end
     end
@@ -152,11 +155,12 @@ end
 
 function startStopDAQ(src,statusTxt)
     % Toggle live acquisition; stores ALL data for both channels
-    persistent lh rawBuf sampleIdx
     fig = ancestor(src,'figure');
 
-    % Re-fetch current objects from appdata
-    dLive     = getappdata(fig,'dLive');
+    boardNum = getappdata(fig,'boardNum');
+    gain     = getappdata(fig,'gain');
+    Fs       = getappdata(fig,'Fs');
+
     ax_raw1   = getappdata(fig,'ax_raw1');
     ax_raw2   = getappdata(fig,'ax_raw2');
     ax_filt1  = getappdata(fig,'ax_filt1');
@@ -164,16 +168,21 @@ function startStopDAQ(src,statusTxt)
     hLine1    = getappdata(fig,'hLine_raw1');
     hLine2    = getappdata(fig,'hLine_raw2');
 
-    if isempty(dLive) || ~isvalid(dLive)
-        set(statusTxt,'String','Session NI invalide. (Re)connectez.','ForegroundColor','red');
+    ch1 = getappdata(fig,'chanNum1');
+    ch2 = getappdata(fig,'chanNum2');
+
+    if isempty(ch1) || isempty(ch2)
+        set(statusTxt,'String','Canaux MCC non définis. (Re)connectez.','ForegroundColor','red');
         return
     end
-    windowPts = dLive.Rate * 5;  % show last 5 s
+
+    windowPts = Fs * 5;  % show last 5 s
+    chunkPts  = 200;     % acquire 200 samples per tick (~0.1s at 2kHz)
 
     if src.Value
         % --- START ---
-        rawBuf    = [];
-        sampleIdx = 0;
+        setappdata(fig,'rawBuf',[]);
+        setappdata(fig,'sampleIdx',0);
         src.String = 'Arrêter l''enregistrement';
 
         % Clear ALL four panes before recording (as requested)
@@ -186,28 +195,39 @@ function startStopDAQ(src,statusTxt)
         hLine1 = plot(ax_raw1,nan,nan,'-'); setappdata(fig,'hLine_raw1',hLine1);
         hLine2 = plot(ax_raw2,nan,nan,'-'); setappdata(fig,'hLine_raw2',hLine2);
 
-        dLive.NotifyWhenDataAvailableExceeds = 200;
-        if ~isempty(lh) && isvalid(lh), delete(lh); end
-        lh = dLive.addlistener('DataAvailable', @(~,evt) processLive(evt));
-
         % Prepare raw axes limits
         set(ax_raw1,'XLim',[0, windowPts]);
         set(ax_raw2,'XLim',[0, windowPts]);
 
-        dLive.startBackground();
+        % Build a timer that acquires small blocks and updates plots
+        t = timer('ExecutionMode','fixedSpacing', ...
+                  'Period', chunkPts/Fs, ...
+                  'TimerFcn', @processLiveTick, ...
+                  'ErrorFcn',  @onTimerError);
+        setappdata(fig,'liveTimer',t);
+        start(t);
+
     else
         % --- STOP ---
         src.String = 'Commencer l''enregistrement';
-        try stop(dLive); catch, end
-        if ~isempty(lh) && isvalid(lh), delete(lh); end
+
+        % Stop timer
+        t = getappdata(fig,'liveTimer');
+        if ~isempty(t) && isa(t,'timer') && isvalid(t)
+            try stop(t); catch, end
+            try delete(t); catch, end
+        end
+        setappdata(fig,'liveTimer',[]);
+
+        rawBuf = getappdata(fig,'rawBuf');
 
         % Final filtered + normalized plots for both channels
         if ~isempty(rawBuf)
-            ch1 = rawBuf(:,1);
-            ch2 = rawBuf(:,min(2,size(rawBuf,2))); % safe if only one channel for any reason
+            ch1sig = rawBuf(:,1);
+            ch2sig = rawBuf(:,2);
 
-            filt1 = filterEMG(ch1);
-            filt2 = filterEMG(ch2);
+            filt1 = filterEMG(ch1sig);
+            filt2 = filterEMG(ch2sig);
 
             mvc = getappdata(fig,'mvc_values'); % [mvc1 mvc2]
             if ~isempty(mvc)
@@ -250,66 +270,115 @@ function startStopDAQ(src,statusTxt)
         end
     end
 
-    function processLive(evt)
-        % Scroll a sliding window but keep rawBuf unlimited
-        newData = evt.Data;
-        if size(newData,2)==1
-            % Ensure 2 columns for consistent handling
-            newData = [newData, newData*0];
+    function processLiveTick(~,~)
+        % Acquire a small chunk (blocking), append to rawBuf, update plots.
+        rawBuf    = getappdata(fig,'rawBuf');
+        sampleIdx = getappdata(fig,'sampleIdx');
+
+        % Acquire chunkPts samples for each channel using cbAInScan
+        numChans = 2;
+        memHandle = cbWinBufAlloc(chunkPts * numChans);
+        if memHandle == 0
+            error('Erreur allocation buffer MCC (cbWinBufAlloc).');
         end
 
-        % Buffer
-        rawBuf  = [rawBuf; newData];
-        N = size(newData,1);
-        sampleIdx = sampleIdx + N;
+        try
+            lowChan  = min(ch1, ch2);
+            highChan = max(ch1, ch2);
 
-        if sampleIdx <= windowPts
-            idx = 1:sampleIdx;
-        else
-            idx = (sampleIdx-windowPts+1):sampleIdx;
+            % NOTE:
+            % cbAInScan reads a contiguous channel range [lowChan..highChan].
+            % If you select non-contiguous channels (e.g., AI0 and AI3), this will also read AI1/AI2.
+            % To keep your GUI consistent (2 channels), select contiguous channels (e.g., AI0 & AI1).
+            if (highChan - lowChan) ~= 1
+                cbWinBufFree(memHandle);
+                error('Choisissez deux canaux contigus (ex: AI0 & AI1). Actuellement: AI%d & AI%d.', ch1, ch2);
+            end
+
+            % Blocking scan (background option = 0)
+            err = cbAInScan(boardNum, lowChan, highChan, chunkPts*numChans, Fs, gain, memHandle, 0);
+            if err ~= 0
+                cbWinBufFree(memHandle);
+                error('Erreur MCC cbAInScan (err=%d).', err);
+            end
+
+            rawCounts = cbWinBufToArray(memHandle, chunkPts*numChans);
+            cbWinBufFree(memHandle);
+
+            rawCounts = reshape(rawCounts, numChans, []).'; % [chunkPts x 2]
+
+            % Convert counts -> volts (12-bit, bipolar ±10V typical):
+            % volts ≈ (counts - 2048) / 2048 * 10
+            volts = (double(rawCounts) - 2048) / 2048 * 10;
+
+            % Append
+            rawBuf = [rawBuf; volts]; %#ok<AGROW>
+            setappdata(fig,'rawBuf',rawBuf);
+
+            N = size(volts,1);
+            sampleIdx = sampleIdx + N;
+            setappdata(fig,'sampleIdx',sampleIdx);
+
+            if sampleIdx <= windowPts
+                idx = 1:sampleIdx;
+            else
+                idx = (sampleIdx-windowPts+1):sampleIdx;
+            end
+
+            % Update plots
+            ch1win = rawBuf(idx,1);
+            ch2win = rawBuf(idx,2);
+
+            active1 = (std(double(ch1win)) > 1e-6) || (max(abs(ch1win)) > 1e-5);
+            active2 = (std(double(ch2win)) > 1e-6) || (max(abs(ch2win)) > 1e-5);
+
+            if active1
+                set(hLine1,'XData',idx,'YData',ch1win);
+                set(ax_raw1,'XLim',[max(1,sampleIdx-windowPts+1), sampleIdx]);
+            else
+                set(hLine1,'XData',nan,'YData',nan);
+            end
+
+            if active2
+                set(hLine2,'XData',idx,'YData',ch2win);
+                set(ax_raw2,'XLim',[max(1,sampleIdx-windowPts+1), sampleIdx]);
+            else
+                set(hLine2,'XData',nan,'YData',nan);
+            end
+
+            drawnow limitrate;
+
+        catch ME
+            % Ensure buffer freed on errors
+            try cbWinBufFree(memHandle); catch, end
+            rethrow(ME);
         end
+    end
 
-        % Activity detection per channel
-        ch1 = rawBuf(idx,1);
-        ch2 = rawBuf(idx,2);
-        active1 = (std(double(ch1)) > 1e-6) || (max(abs(ch1)) > 1e-5);
-        active2 = (std(double(ch2)) > 1e-6) || (max(abs(ch2)) > 1e-5);
-
-        if active1
-            set(hLine1,'XData',idx,'YData',ch1);
-            set(ax_raw1,'XLim',[max(1,sampleIdx-windowPts+1), sampleIdx]);
-        else
-            set(hLine1,'XData',nan,'YData',nan);
-        end
-
-        if active2
-            set(hLine2,'XData',idx,'YData',ch2);
-            set(ax_raw2,'XLim',[max(1,sampleIdx-windowPts+1), sampleIdx]);
-        else
-            set(hLine2,'XData',nan,'YData',nan);
-        end
-
-        drawnow limitrate;
+    function onTimerError(~,evt)
+        set(statusTxt,'String','Erreur acquisition Digilent/MCC (timer).','ForegroundColor','red');
+        disp(evt.Data);
     end
 end
 
 function measureMVC(figHandle,mvcTxt,chIdx)
     % Measure MVC for a SINGLE selected channel (5 s) with LIVE display.
+    % Digilent/MCC version: acquires a blocking 5-second scan and plots it.
 
-    % If live session is running, stop and RELEASE it
-    dLive = getappdata(figHandle,'dLive');
-    if ~isempty(dLive) && isvalid(dLive)
-        try stop(dLive); catch, end
-        try release(dLive); catch, end
+    boardNum = getappdata(figHandle,'boardNum');
+    gain     = getappdata(figHandle,'gain');
+    Fs       = getappdata(figHandle,'Fs');
+
+    % Stop any live timer
+    t = getappdata(figHandle,'liveTimer');
+    if ~isempty(t) && isa(t,'timer') && isvalid(t)
+        try stop(t); catch, end
+        try delete(t); catch, end
     end
-    setappdata(figHandle,'dLive',[]);  % mark as detached
+    setappdata(figHandle,'liveTimer',[]);
 
-    % Ensure device is free, then set up a clean session
-    try daqreset(); catch, end
-
-    deviceID = getappdata(figHandle,'deviceID'); if isempty(deviceID), deviceID = 'Dev1'; end
-    ch1 = getappdata(figHandle,'chanNum1'); if isempty(ch1), ch1 = 1; end
-    ch2 = getappdata(figHandle,'chanNum2'); if isempty(ch2), ch2 = 2; end
+    ch1 = getappdata(figHandle,'chanNum1'); if isempty(ch1), ch1 = 0; end
+    ch2 = getappdata(figHandle,'chanNum2'); if isempty(ch2), ch2 = 1; end
 
     % Axes
     ax_raw1  = getappdata(figHandle,'ax_raw1');
@@ -317,7 +386,6 @@ function measureMVC(figHandle,mvcTxt,chIdx)
     ax_filt1 = getappdata(figHandle,'ax_filt1');
     ax_filt2 = getappdata(figHandle,'ax_filt2');
 
-    % If redoing on that side, clear panes for clarity (keeps other side if not redone)
     mvc = getappdata(figHandle,'mvc_values'); if isempty(mvc), mvc = [0 0]; end
     if mvc(chIdx) > 0
         cla(ax_raw1);  title(ax_raw1,'EMG1 brut');  xlabel(ax_raw1,'Échantillon'); ylabel(ax_raw1,'Amplitude'); hold(ax_raw1,'on');
@@ -327,130 +395,81 @@ function measureMVC(figHandle,mvcTxt,chIdx)
         setappdata(figHandle,'mvc_waveforms',struct('raw1',[],'raw2',[],'env1',[],'env2',[]));
     end
 
-    % Decide which physical channel to sample
     if chIdx==1
         targetRaw = ax_raw1; targetFilt = ax_filt1; physCh = ch1; side = 1;
     else
         targetRaw = ax_raw2; targetFilt = ax_filt2; physCh = ch2; side = 2;
     end
 
-    % --- LIVE streaming for 5 seconds with listener + timer ---
-    Fs = 2000; durSec = 5;
-    sMVC = [];
-    try
-        sMVC = daq.createSession('ni');
-        sMVC.Rate = Fs;
-        sMVC.IsContinuous = true;
-        try
-            sMVC.addAnalogInputChannel(deviceID, physCh, 'Voltage');
-        catch
-            sMVC.addAnalogInputChannel(deviceID, physCh-1, 'Voltage');
-        end
-        sMVC.Channels(1).TerminalConfig = 'SingleEnded';
-    catch ME
-        set(mvcTxt,'String',sprintf('MVC%d non mesuré (erreur matériel).',side));
-        if ~isempty(sMVC), try release(sMVC); catch, end, end
-        reconnectLive(figHandle);
-        disp(getReport(ME,'extended'));
-        return
-    end
-
-    % Prepare axes for live display
-    cla(targetRaw);  hold(targetRaw,'on');
-    cla(targetFilt); hold(targetFilt,'on');
-    title(targetRaw, sprintf('EMG%d MVC (LIVE, %ds)', side));
-    xlabel(targetRaw,'Échantillon'); ylabel(targetRaw,'Amplitude');
-    title(targetFilt, sprintf('EMG%d enveloppe MVC (LIVE)', side));
-    xlabel(targetFilt,'Échantillon'); ylabel(targetFilt,'Amplitude');
-    set(targetRaw,'XLim',[0 Fs*durSec]);
-
-    hRaw  = plot(targetRaw,nan,nan,'-');
-    hFilt = plot(targetFilt,nan,nan,'-');
+    FsMVC = Fs; durSec = 5;
+    nPts  = FsMVC * durSec;
 
     set(mvcTxt,'String',sprintf('Mesure MVC%d en cours (5 s)...',side)); drawnow;
 
-    % Live buffers and listener
-    buf = [];
-    sMVC.NotifyWhenDataAvailableExceeds = 200;
-    lh = sMVC.addlistener('DataAvailable', @(~,evt) onData(evt));
-
-    % Timer to stop after 5 seconds
-    t = timer('StartDelay',durSec,'TimerFcn',@(~,~) stopAndFinalize());
-    start(t);
-    try
-        sMVC.startBackground();
-    catch ME
-        set(mvcTxt,'String',sprintf('MVC%d non mesuré (erreur démarrage).',side));
-        try delete(lh); catch, end
-        try stop(sMVC); catch, end
-        try release(sMVC); catch, end
-        stopTimerSafe(t);
+    % Acquire MVC signal (single channel) using cbAInScan over a 1-channel range
+    memHandle = cbWinBufAlloc(nPts);
+    if memHandle == 0
+        set(mvcTxt,'String',sprintf('MVC%d non mesuré (alloc buffer).',side));
         reconnectLive(figHandle);
-        disp(getReport(ME,'extended'));
         return
     end
 
-    % ------- nested helpers (capture workspace of measureMVC) -------
-    function onData(evt)
-        newy = evt.Data(:,1);
-        buf  = [buf; newy]; %#ok<AGROW>
-
-        % Live raw
-        x = 1:numel(buf);
-        set(hRaw,'XData',x,'YData',buf);
-
-        % Live envelope (quick RMS window)
-        env = sqrt(movmean((buf - mean(buf)).^2, 100));
-        set(hFilt,'XData',x,'YData',env);
-
-        drawnow limitrate;
-    end
-
-    function stopAndFinalize()
-        % Stop + cleanup session
-        try stop(sMVC); catch, end
-        try delete(lh); catch, end
-        try release(sMVC); catch, end
-        stopTimerSafe(t);
-
-        if isempty(buf) || all(~isfinite(buf))
-            set(mvcTxt,'String',sprintf('MVC%d non mesuré (pas de signal).',side));
+    try
+        err = cbAInScan(boardNum, physCh, physCh, nPts, FsMVC, gain, memHandle, 0);
+        if err ~= 0
+            cbWinBufFree(memHandle);
+            set(mvcTxt,'String',sprintf('MVC%d non mesuré (cbAInScan err=%d).',side,err));
             reconnectLive(figHandle);
             return
         end
 
-        % Compute MVC = median of top 2000 abs samples (or all if shorter)
-        nTake = min(2000, numel(buf));
-        topVals = maxk(abs(buf), nTake);
-        mvcVal = median(topVals);
+        rawCounts = cbWinBufToArray(memHandle, nPts);
+        cbWinBufFree(memHandle);
 
-        % Save MVC values
-        mvcLoc = getappdata(figHandle,'mvc_values'); if isempty(mvcLoc), mvcLoc = [0 0]; end
-        mvcLoc(side) = mvcVal;
-        setappdata(figHandle,'mvc_values', mvcLoc);
+        % Convert counts -> volts (approx for 12-bit ±10V)
+        buf = (double(rawCounts(:)) - 2048) / 2048 * 10;
 
-        % Persist final waveforms on screen (already plotted) + store
-        envFull = sqrt(movmean((buf - mean(buf)).^2, 100));
-        wf = getappdata(figHandle,'mvc_waveforms');
-        if side==1
-            wf.raw1 = buf;  wf.env1 = envFull;
-        else
-            wf.raw2 = buf;  wf.env2 = envFull;
-        end
-        setappdata(figHandle,'mvc_waveforms',wf);
-
-        set(mvcTxt,'String',sprintf('MVC1 = %.2f | MVC2 = %.2f',mvcLoc(1),mvcLoc(2)));
-
-        % Reconnect the live session (so Start Recording works immediately)
+    catch ME
+        try cbWinBufFree(memHandle); catch, end
+        set(mvcTxt,'String',sprintf('MVC%d non mesuré (erreur).',side));
         reconnectLive(figHandle);
+        disp(getReport(ME,'extended'));
+        return
     end
 
-    function stopTimerSafe(tt)
-        if isa(tt,'timer') && isvalid(tt)
-            try stop(tt); catch, end
-            try delete(tt); catch, end
-        end
+    % Plot raw + envelope
+    cla(targetRaw);  hold(targetRaw,'on');
+    cla(targetFilt); hold(targetFilt,'on');
+    title(targetRaw, sprintf('EMG%d MVC (%ds)', side, durSec));
+    xlabel(targetRaw,'Échantillon'); ylabel(targetRaw,'Amplitude');
+    title(targetFilt, sprintf('EMG%d enveloppe MVC', side));
+    xlabel(targetFilt,'Échantillon'); ylabel(targetFilt,'Amplitude');
+
+    plot(targetRaw, buf, '-');
+
+    envFull = sqrt(movmean((buf - mean(buf)).^2, 100));
+    plot(targetFilt, envFull, '-');
+
+    % Compute MVC = median of top 2000 abs samples (or all if shorter)
+    nTake = min(2000, numel(buf));
+    topVals = maxk(abs(buf), nTake);
+    mvcVal = median(topVals);
+
+    mvcLoc = getappdata(figHandle,'mvc_values'); if isempty(mvcLoc), mvcLoc = [0 0]; end
+    mvcLoc(side) = mvcVal;
+    setappdata(figHandle,'mvc_values', mvcLoc);
+
+    wf = getappdata(figHandle,'mvc_waveforms');
+    if side==1
+        wf.raw1 = buf;  wf.env1 = envFull;
+    else
+        wf.raw2 = buf;  wf.env2 = envFull;
     end
+    setappdata(figHandle,'mvc_waveforms',wf);
+
+    set(mvcTxt,'String',sprintf('MVC1 = %.2f | MVC2 = %.2f',mvcLoc(1),mvcLoc(2)));
+
+    reconnectLive(figHandle);
 end
 
 function reconnectLive(figHandle)
@@ -462,16 +481,15 @@ end
 
 function filtered = filterEMG(raw)
     raw = raw - mean(raw);
-    
-    Fs = 2000; 
-    f0 = 60; 
-    Q = 2;                % Q=35–60: notch fin
+
+    Fs = 2000;
+    f0 = 60;
+    Q = 2;
     wo = f0/(Fs/2); bw = wo/Q;
     [b,a] = iirnotch(wo, bw);
-    emg_notch = filtfilt(b,a, raw);         % zero-phase
-        
-    
-    [b,a] = butter(4, [20 400]/(Fs/2), 'bandpass'); % Fs = 2000 -> Nyquist = 1000
+    emg_notch = filtfilt(b,a, raw);
+
+    [b,a] = butter(4, [20 400]/(Fs/2), 'bandpass');
     emg = filtfilt(b,a,emg_notch);
     filtered = sqrt(movmean(emg.^2,100));
 end
