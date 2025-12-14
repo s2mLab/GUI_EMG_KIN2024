@@ -681,60 +681,86 @@ function setLineAlphaOrLighten(h, rgb, alpha)
 end
 
 function sim = buildSimData(Fs)
-% Builds simulated EMG datasets (MVC and Recording) according to spec.
-% Noise: ~0.2 V RMS baseline
+% Générateur EMG simulé
+% - Signal centré à 0
+% - Amplitude modulée (enveloppe)
+% - Bruit blanc
+% - Parasite 60 Hz sur muscle 2 uniquement
 
-    rng(1); % deterministic
+    rng(1); % reproductible
 
-    noiseStd = 0.2;
+    noiseStd = 0.2;      % bruit RMS (V)
+    f_carrier = 80;      % pseudo-EMG (Hz)
+    f_line = 60;         % secteur (Hz)
 
-    % ---------- MVC (5 s): ramp 1s, hold 3s, rest 1s ----------
+    %% ---------- MVC (5 s): rampe 1s, plateau 3s, repos 1s ----------
     durMVC = 5;
     Nmvc = durMVC * Fs;
     tMVC = (0:Nmvc-1)'/Fs;
 
-    A1 = 2.0; % muscle 1 peak
-    A2 = 3.0; % muscle 2 peak
-
+    % Enveloppe MVC (0 → 1 → 0)
     envMVC = zeros(Nmvc,1);
-    n1 = 1*Fs;
-    n2 = 3*Fs;
-    n3 = 1*Fs;
+    n1 = 1*Fs; n2 = 3*Fs; n3 = 1*Fs;
     envMVC(1:n1) = linspace(0,1,n1)';
     envMVC(n1+1:n1+n2) = 1;
     envMVC(n1+n2+1:n1+n2+n3) = 0;
 
-    mvc1 = A1*envMVC + noiseStd*randn(Nmvc,1);
-    mvc2 = A2*envMVC + noiseStd*randn(Nmvc,1);
+    % Porteuse EMG (zéro moyenne)
+    carrier1 = randn(Nmvc,1);
+    carrier2 = randn(Nmvc,1);
 
-    % ---------- Recording (5 s) ----------
+    % Amplitudes MVC
+    A1 = 2.0;   % muscle 1
+    A2 = 3.0;   % muscle 2
+
+    mvc1 = A1 * envMVC .* carrier1 + noiseStd*randn(Nmvc,1);
+    mvc2 = A2 * envMVC .* carrier2 + noiseStd*randn(Nmvc,1) ...
+           + 0.3*sin(2*pi*f_line*tMVC); % 60 Hz UNIQUEMENT muscle 2
+
+    % Centrage explicite (sécurité)
+    mvc1 = mvc1 - mean(mvc1);
+    mvc2 = mvc2 - mean(mvc2);
+
+    %% ---------- Enregistrement (5 s) ----------
     durRec = 5;
     Nrec = durRec * Fs;
     tRec = (0:Nrec-1)'/Fs;
 
     rec1 = noiseStd*randn(Nrec,1);
-    rec2 = noiseStd*randn(Nrec,1);
+    rec2 = noiseStd*randn(Nrec,1) + 0.3*sin(2*pi*f_line*tRec); % 60 Hz muscle 2
 
-    % Muscle 1: two bursts 1.5V, 1s each
+    carrier1 = randn(Nrec,1);
+    carrier2 = randn(Nrec,1);
+
+    % Muscle 1 : 2 bouffées, 1.5 V, 1 s
     burstA1 = 1.5;
     burstDur1 = 1.0; nb1 = round(burstDur1*Fs);
-    starts1 = round([1.0, 3.0]*Fs); % start at 1s and 3s
+    starts1 = round([1.0, 3.0]*Fs);
+
     for s = starts1
         idx = s + (1:nb1);
         idx(idx>Nrec) = [];
-        rec1(idx) = rec1(idx) + burstA1;
+        env = ones(numel(idx),1);
+        rec1(idx) = rec1(idx) + burstA1 * env .* carrier1(idx);
     end
 
-    % Muscle 2: four bursts 0.5V, 0.7s each
+    % Muscle 2 : 4 bouffées, 0.5 V, 0.7 s
     burstA2 = 0.5;
     burstDur2 = 0.7; nb2 = round(burstDur2*Fs);
     starts2 = round([0.6, 1.7, 2.8, 3.9]*Fs);
+
     for s = starts2
         idx = s + (1:nb2);
         idx(idx>Nrec) = [];
-        rec2(idx) = rec2(idx) + burstA2;
+        env = ones(numel(idx),1);
+        rec2(idx) = rec2(idx) + burstA2 * env .* carrier2(idx);
     end
 
+    % Centrage explicite
+    rec1 = rec1 - mean(rec1);
+    rec2 = rec2 - mean(rec2);
+
+    %% ---------- Sortie ----------
     sim = struct();
     sim.Fs   = Fs;
     sim.tMVC = tMVC;
