@@ -19,6 +19,7 @@ function EMG_GUI_digilent()
     setappdata(f,'color_emg1',color_emg1);
     setappdata(f,'color_emg2',color_emg2);
     setappdata(f,'alpha_overlay',alpha_overlay);
+    setappdata(f,'isRecording',false);
 
     %% Status & MVC text
     statusTxt = uicontrol(f,'Style','text','String','Connexion à Digilent/MCC...', ...
@@ -216,6 +217,7 @@ function EMG_GUI_digilent()
 end
 
 function startStopDAQ(src,statusTxt)
+    % Toggle acquisition WITHOUT timer (robust): uses a while-loop + drawnow
     fig = ancestor(src,'figure');
 
     boardNum = getappdata(fig,'boardNum');
@@ -252,6 +254,7 @@ function startStopDAQ(src,statusTxt)
         % --- START ---
         setappdata(fig,'rawBuf',[]);
         setappdata(fig,'sampleIdx',0);
+        setappdata(fig,'isRecording',true);
 
         src.String = '⏹ Stop';
         set(popupPair,'Enable','off');
@@ -265,7 +268,7 @@ function startStopDAQ(src,statusTxt)
         cla(ax_filt1); title(ax_filt1,'EMG1 filtré (normalisé)'); xlabel(ax_filt1,'Temps (s)'); ylabel(ax_filt1,'(%MVC)');
         cla(ax_filt2); title(ax_filt2,'EMG2 filtré (normalisé)'); xlabel(ax_filt2,'Temps (s)'); ylabel(ax_filt2,'(%MVC)');
 
-        % Live lines
+        % Live lines (with colours)
         hLine1 = plot(ax_raw1,nan,nan,'-','Color',color_emg1); setappdata(fig,'hLine_raw1',hLine1);
         hLine2 = plot(ax_raw2,nan,nan,'-','Color',color_emg2); setappdata(fig,'hLine_raw2',hLine2);
 
@@ -277,27 +280,105 @@ function startStopDAQ(src,statusTxt)
             setappdata(fig,'sim_idx_record',1);
         end
 
-        t = timer('ExecutionMode','fixedSpacing', ...
-            'Period', chunkPts/Fs, ...
-            'TimerFcn', @processLiveTick, ...
-            'ErrorFcn',  @onTimerError);
-        setappdata(fig,'liveTimer',t);
-        start(t);
+        % Acquisition loop (non-timer)
+        while getappdata(fig,'isRecording') && ishandle(fig)
+            rawBuf    = getappdata(fig,'rawBuf');
+            sampleIdx = getappdata(fig,'sampleIdx');
+
+            % Acquire a chunk
+            if test_mode
+                sim = getappdata(fig,'sim_data');
+                if isempty(sim)
+                    sim = buildSimData(Fs);
+                    setappdata(fig,'sim_data',sim);
+                    setappdata(fig,'sim_idx_record',1);
+                end
+
+                idx0 = getappdata(fig,'sim_idx_record');
+                idx1 = idx0 + chunkPts - 1;
+
+                if idx1 > numel(sim.rec1)
+                    % auto-stop at end of simulated record
+                    setappdata(fig,'isRecording',false);
+                    break
+                end
+
+                v1 = sim.rec1(idx0:idx1);
+                v2 = sim.rec2(idx0:idx1);
+                setappdata(fig,'sim_idx_record',idx1+1);
+            else
+                v1 = acquireOneChannel(boardNum, ch1, gain, Fs, chunkPts);
+                v2 = acquireOneChannel(boardNum, ch2, gain, Fs, chunkPts);
+            end
+
+            volts = [v1(:), v2(:)];
+            rawBuf = [rawBuf; volts]; %#ok<AGROW>
+            setappdata(fig,'rawBuf',rawBuf);
+
+            N = size(volts,1);
+            sampleIdx = sampleIdx + N;
+            setappdata(fig,'sampleIdx',sampleIdx);
+
+            totalPts = sampleIdx;
+            if totalPts <= windowPts
+                idx = 1:totalPts;
+            else
+                idx = (totalPts-windowPts+1):totalPts;
+            end
+
+            tsec = (idx-idx(1))/Fs; % 0..5s window
+            ch1win = rawBuf(idx,1);
+            ch2win = rawBuf(idx,2);
+
+            active1 = (std(double(ch1win)) > 1e-6) || (max(abs(ch1win)) > 1e-5);
+            active2 = (std(double(ch2win)) > 1e-6) || (max(abs(ch2win)) > 1e-5);
+
+            if active1
+                set(hLine1,'XData',tsec,'YData',ch1win,'Color',color_emg1);
+                set(ax_raw1,'XLim',[0, 5]);
+            else
+                set(hLine1,'XData',nan,'YData',nan);
+            end
+
+            if active2
+                set(hLine2,'XData',tsec,'YData',ch2win,'Color',color_emg2);
+                set(ax_raw2,'XLim',[0, 5]);
+            else
+                set(hLine2,'XData',nan,'YData',nan);
+            end
+
+            % Blink REC
+            blink = getappdata(fig,'recBlinkOn');
+            if blink
+                set(recTxt,'String','');
+            else
+                set(recTxt,'String','REC ●');
+            end
+            setappdata(fig,'recBlinkOn',~blink);
+
+            drawnow limitrate;
+
+            % If user clicked Stop, callback set src.Value=0 already; we honour isRecording flag
+            if ~getappdata(fig,'isRecording')
+                break
+            end
+        end
+
+        % If we exited because sim ended, reflect UI state immediately
+        if src.Value == 1 && ~getappdata(fig,'isRecording')
+            src.Value = 0;
+            startStopDAQ(src,statusTxt);
+        end
 
     else
         % --- STOP ---
+        setappdata(fig,'isRecording',false);
+
         src.String = '⏺ Enregistrer';
         set(popupPair,'Enable','on');
 
         set(recTxt,'String','');
         setappdata(fig,'recBlinkOn',false);
-
-        t = getappdata(fig,'liveTimer');
-        if ~isempty(t) && isa(t,'timer') && isvalid(t)
-            try stop(t); catch, end
-            try delete(t); catch, end
-        end
-        setappdata(fig,'liveTimer',[]);
 
         rawBuf = getappdata(fig,'rawBuf');
 
