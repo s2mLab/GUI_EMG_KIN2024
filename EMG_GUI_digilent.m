@@ -20,17 +20,23 @@ function EMG_GUI_digilent()
     mvcTxt = uicontrol(f,'Style','text','String','', ...
         'Units','normalized','Position',[0.58,0.94,0.4,0.04], ...
         'FontSize',12,'HorizontalAlignment','left','ForegroundColor',[0 0 0]);
+    recTxt = uicontrol(f,'Style','text','String','', ...
+    'Units','normalized','Position',[0.40,0.94,0.15,0.04], ...
+    'FontSize',12,'FontWeight','bold','HorizontalAlignment','left', ...
+    'ForegroundColor',[1 0 0]);
+    setappdata(f,'recTxt',recTxt);
+    setappdata(f,'recBlinkOn',false);
+
 
     %% ONE popup: channel pair selector + (Re)connect
     pairList = arrayfun(@(k) sprintf('AI%d-%d',k,k+1), 0:6, 'UniformOutput', false);
     uicontrol(f,'Style','text','String','Paire EMG:', ...
         'Units','normalized','Position',[0.05,0.905,0.08,0.035],'HorizontalAlignment','left');
     popupPair = uicontrol(f,'Style','popupmenu','String',pairList, ...
-        'Units','normalized','Position',[0.13,0.9,0.10,0.045], 'FontSize',11, 'Value',1); % AI0-1
+    'Units','normalized','Position',[0.13,0.9,0.10,0.045], ...
+    'FontSize',11,'Value',1, ...
+    'Callback',@(~,~) connectDAQ()); % AI0-1
 
-    btnReconnect = uicontrol(f,'Style','pushbutton','String','(Re)connecter', ...
-        'Units','normalized','Position',[0.25,0.9,0.12,0.05],'FontSize',11, ...
-        'Callback',@(~,~) connectDAQ());
 
     %% Axes (2x2 grid): raw1, raw2, filt1, filt2
     ax_raw1 = axes(f,'Units','normalized','Position',[0.07,0.58,0.40,0.30]); hold(ax_raw1,'on');
@@ -48,20 +54,20 @@ function EMG_GUI_digilent()
     title(ax_filt2,'EMG2 filtré (normalisé)'); xlabel(ax_filt2,'Temps (s)'); ylabel(ax_filt2,'(%MVC)');
 
     %% Controls
-    btnStart = uicontrol(f,'Style','togglebutton','String','Commencer l''enregistrement', ...
-        'Units','normalized','Position',[0.54,0.9,0.20,0.05],'FontSize',12, ...
+    btnStart = uicontrol(f,'Style','togglebutton','String','● Enregistrer', ...
+        'Units','normalized','Position',[0.54,0.95,0.20,0.035],'FontSize',12, ...
         'Callback',@(src,~) startStopDAQ(src,statusTxt));
 
     uicontrol(f,'Style','pushbutton','String','MVC 1', ...
-        'Units','normalized','Position',[0.76,0.9,0.08,0.05],'FontSize',12, ...
+        'Units','normalized','Position',[0.76,0.95,0.08,0.035],'FontSize',12, ...
         'Callback',@(~,~) measureMVC(f,mvcTxt,1));
     uicontrol(f,'Style','pushbutton','String','MVC 2', ...
-        'Units','normalized','Position',[0.85,0.9,0.08,0.05],'FontSize',12, ...
+        'Units','normalized','Position',[0.85,0.95,0.08,0.035],'FontSize',12, ...
         'Callback',@(~,~) measureMVC(f,mvcTxt,2));
 
     % Export button moved to bottom
     uicontrol(f,'Style','pushbutton','String','Exporter les graphiques', ...
-        'Units','normalized','Position',[0.80,0.02,0.18,0.06],'FontSize',12, ...
+        'Units','normalized','Position',[0.80,0.02,0.18,0.035],'FontSize',12, ...
         'Callback',@(~,~) exportGraphs(ax_raw1,ax_raw2,ax_filt1,ax_filt2));
 
     %% MCC configuration (stored)
@@ -130,9 +136,8 @@ function EMG_GUI_digilent()
             if err1 ~= 0 || err2 ~= 0
                 error('MCC cbAIn error (err1=%d, err2=%d).', err1, err2);
             end
-
-            set(statusTxt,'String',sprintf('Digilent/MCC connecté (USB-1208FS-PLUS) | canaux [AI%d, AI%d]',ch1,ch2), ...
-                          'ForegroundColor','green');
+            set(statusTxt,'String',sprintf('Digilent/MCC connecté | paire AI%d-%d',ch1,ch2), ...
+              'ForegroundColor','green');
 
         catch ME
             set(statusTxt,'String','Échec de connexion Digilent/MCC','ForegroundColor','red');
@@ -143,6 +148,7 @@ end
 
 function startStopDAQ(src,statusTxt)
     fig = ancestor(src,'figure');
+    popupPair = getappdata(fig,'popupPair');
 
     boardNum = getappdata(fig,'boardNum');
     gain     = getappdata(fig,'gain');
@@ -154,6 +160,8 @@ function startStopDAQ(src,statusTxt)
     ax_filt2  = getappdata(fig,'ax_filt2');
     hLine1    = getappdata(fig,'hLine_raw1');
     hLine2    = getappdata(fig,'hLine_raw2');
+
+    recTxt = getappdata(fig,'recTxt');
 
     ch1 = getappdata(fig,'chanNum1');
     ch2 = getappdata(fig,'chanNum2');
@@ -168,7 +176,11 @@ function startStopDAQ(src,statusTxt)
     if src.Value
         setappdata(fig,'rawBuf',[]);
         setappdata(fig,'sampleIdx',0);
-        src.String = 'Arrêter l''enregistrement';
+        src.String = '⏹ Stop';
+        set(popupPair,'Enable','off');
+        set(recTxt,'String','REC ●');
+        setappdata(fig,'recBlinkOn',true);
+
 
         cla(ax_raw1); hold(ax_raw1,'on'); title(ax_raw1,'EMG1 brut'); xlabel(ax_raw1,'Temps (s)'); ylabel(ax_raw1,'Activité (V)');
         cla(ax_raw2); hold(ax_raw2,'on'); title(ax_raw2,'EMG2 brut'); xlabel(ax_raw2,'Temps (s)'); ylabel(ax_raw2,'Activité (V)');
@@ -189,7 +201,11 @@ function startStopDAQ(src,statusTxt)
         start(t);
 
     else
-        src.String = 'Commencer l''enregistrement';
+        src.String = '● Enregistrer';
+        set(popupPair,'Enable','on');
+        set(recTxt,'String','');
+        setappdata(fig,'recBlinkOn',false);
+
 
         t = getappdata(fig,'liveTimer');
         if ~isempty(t) && isa(t,'timer') && isvalid(t)
@@ -292,6 +308,15 @@ function startStopDAQ(src,statusTxt)
         else
             set(hLine2,'XData',nan,'YData',nan);
         end
+
+        blink = getappdata(fig,'recBlinkOn');
+        if blink
+            set(recTxt,'String','');
+        else
+            set(recTxt,'String','REC ●');
+        end
+        setappdata(fig,'recBlinkOn',~blink);
+
 
         drawnow limitrate;
     end
