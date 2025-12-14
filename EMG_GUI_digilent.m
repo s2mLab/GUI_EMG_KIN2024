@@ -1,51 +1,66 @@
 function EMG_GUI_digilent()
     % Digilent / MCC (USB-1208FS-PLUS) EMG GUI for real-time acquisition and display (2 channels)
     %
-    % 2-channel pairing via ONE popup:
+    % ONE popup selects the pair:
     %   - AI0-1, AI1-2, AI2-3, AI3-4, AI4-5, AI5-6, AI6-7
+    %
+    % Confirmed setup: USB-1208FS-PLUS, 2 channels wired in DIFFERENTIAL:
+    %   EMG1: AIx+ (signal) / AIx- (Grass GND)
+    %   EMG2: AI(x+1)+ (signal) / AI(x+1)- (Grass GND)
     %
     % Requirements:
     %   - MCC Universal Library installed + MATLAB interface on path
-    %   - Functions available: cbAIn, cbAInScan, cbWinBufAlloc, cbWinBufToArray, cbWinBufFree
+    %   - Functions: cbAIn, cbAInScan, cbWinBufAlloc, cbWinBufToArray, cbWinBufFree
     %   - Optional for exact volts: cbToEngUnits
 
     % Create the GUI
     f = figure('Name','NI DAQ EMG Acquisition','NumberTitle','off', ...
-               'Position',[100,100,900,700],'Units','normalized');
+        'Position',[100,100,900,700],'Units','normalized');
+
+    %% Colours (EMG1 / EMG2)
+    color_emg1 = [0 0.4470 0.7410];   % blue
+    color_emg2 = [0.8500 0.3250 0.0980]; % orange
+    alpha_overlay = 0.20;             % "transparency" for overlay lines
+
+    setappdata(f,'color_emg1',color_emg1);
+    setappdata(f,'color_emg2',color_emg2);
+    setappdata(f,'alpha_overlay',alpha_overlay);
 
     %% Status & MVC text
     statusTxt = uicontrol(f,'Style','text','String','Connexion à Digilent/MCC...', ...
-        'Units','normalized','Position',[0.05,0.94,0.5,0.04], ...
+        'Units','normalized','Position',[0.05,0.94,0.35,0.04], ...
         'FontSize',12,'HorizontalAlignment','left');
-    mvcTxt = uicontrol(f,'Style','text','String','', ...
-        'Units','normalized','Position',[0.58,0.94,0.4,0.04], ...
-        'FontSize',12,'HorizontalAlignment','left','ForegroundColor',[0 0 0]);
+
+    % Blinking REC indicator
     recTxt = uicontrol(f,'Style','text','String','', ...
-    'Units','normalized','Position',[0.40,0.94,0.15,0.04], ...
-    'FontSize',12,'FontWeight','bold','HorizontalAlignment','left', ...
-    'ForegroundColor',[1 0 0]);
+        'Units','normalized','Position',[0.40,0.94,0.15,0.04], ...
+        'FontSize',12,'FontWeight','bold','HorizontalAlignment','left', ...
+        'ForegroundColor',[1 0 0]);
     setappdata(f,'recTxt',recTxt);
     setappdata(f,'recBlinkOn',false);
 
+    mvcTxt = uicontrol(f,'Style','text','String','', ...
+        'Units','normalized','Position',[0.58,0.94,0.4,0.04], ...
+        'FontSize',12,'HorizontalAlignment','left','ForegroundColor',[0 0 0]);
 
-    %% ONE popup: channel pair selector + (Re)connect
+    %% ONE popup: channel pair selector (auto-connect on change)
     pairList = arrayfun(@(k) sprintf('AI%d-%d',k,k+1), 0:6, 'UniformOutput', false);
     uicontrol(f,'Style','text','String','Paire EMG:', ...
         'Units','normalized','Position',[0.05,0.905,0.08,0.035],'HorizontalAlignment','left');
-    popupPair = uicontrol(f,'Style','popupmenu','String',pairList, ...
-    'Units','normalized','Position',[0.13,0.9,0.10,0.045], ...
-    'FontSize',11,'Value',1, ...
-    'Callback',@(~,~) connectDAQ()); % AI0-1
 
+    popupPair = uicontrol(f,'Style','popupmenu','String',pairList, ...
+        'Units','normalized','Position',[0.13,0.9,0.10,0.045], ...
+        'FontSize',11,'Value',1, ...
+        'Callback',@(~,~) connectDAQ()); % auto action on change
 
     %% Axes (2x2 grid): raw1, raw2, filt1, filt2
     ax_raw1 = axes(f,'Units','normalized','Position',[0.07,0.58,0.40,0.30]); hold(ax_raw1,'on');
     title(ax_raw1,'EMG1 brut'); xlabel(ax_raw1,'Temps (s)'); ylabel(ax_raw1,'Activité (V)');
-    hLine_raw1 = plot(ax_raw1,nan,nan,'-');
+    hLine_raw1 = plot(ax_raw1,nan,nan,'-','Color',color_emg1);
 
     ax_raw2 = axes(f,'Units','normalized','Position',[0.53,0.58,0.40,0.30]); hold(ax_raw2,'on');
     title(ax_raw2,'EMG2 brut'); xlabel(ax_raw2,'Temps (s)'); ylabel(ax_raw2,'Activité (V)');
-    hLine_raw2 = plot(ax_raw2,nan,nan,'-');
+    hLine_raw2 = plot(ax_raw2,nan,nan,'-','Color',color_emg2);
 
     ax_filt1 = axes(f,'Units','normalized','Position',[0.07,0.15,0.40,0.30]); hold(ax_filt1,'on');
     title(ax_filt1,'EMG1 filtré (normalisé)'); xlabel(ax_filt1,'Temps (s)'); ylabel(ax_filt1,'(%MVC)');
@@ -53,21 +68,22 @@ function EMG_GUI_digilent()
     ax_filt2 = axes(f,'Units','normalized','Position',[0.53,0.15,0.40,0.30]); hold(ax_filt2,'on');
     title(ax_filt2,'EMG2 filtré (normalisé)'); xlabel(ax_filt2,'Temps (s)'); ylabel(ax_filt2,'(%MVC)');
 
-    %% Controls
-    btnStart = uicontrol(f,'Style','togglebutton','String','● Enregistrer', ...
-        'Units','normalized','Position',[0.54,0.95,0.20,0.035],'FontSize',12, ...
+    %% Controls (height reduced by 2)
+    btnStart = uicontrol(f,'Style','togglebutton','String','⏺ Enregistrer', ...
+        'Units','normalized','Position',[0.54,0.9,0.20,0.025],'FontSize',12, ...
         'Callback',@(src,~) startStopDAQ(src,statusTxt));
 
     uicontrol(f,'Style','pushbutton','String','MVC 1', ...
-        'Units','normalized','Position',[0.76,0.95,0.08,0.035],'FontSize',12, ...
+        'Units','normalized','Position',[0.76,0.9,0.08,0.025],'FontSize',12, ...
         'Callback',@(~,~) measureMVC(f,mvcTxt,1));
+
     uicontrol(f,'Style','pushbutton','String','MVC 2', ...
-        'Units','normalized','Position',[0.85,0.95,0.08,0.035],'FontSize',12, ...
+        'Units','normalized','Position',[0.85,0.9,0.08,0.025],'FontSize',12, ...
         'Callback',@(~,~) measureMVC(f,mvcTxt,2));
 
-    % Export button moved to bottom
+    % Export button moved to bottom + height/2
     uicontrol(f,'Style','pushbutton','String','Exporter les graphiques', ...
-        'Units','normalized','Position',[0.80,0.02,0.18,0.035],'FontSize',12, ...
+        'Units','normalized','Position',[0.80,0.02,0.18,0.03],'FontSize',12, ...
         'Callback',@(~,~) exportGraphs(ax_raw1,ax_raw2,ax_filt1,ax_filt2));
 
     %% MCC configuration (stored)
@@ -123,7 +139,6 @@ function EMG_GUI_digilent()
             boardNum = getappdata(f,'boardNum');
             gain     = getappdata(f,'gain');
 
-            % Pair selection -> channels
             pairIdx = get(getappdata(f,'popupPair'),'Value'); % 1..7 => AI0-1..AI6-7
             ch1 = pairIdx - 1;
             ch2 = ch1 + 1;
@@ -136,8 +151,9 @@ function EMG_GUI_digilent()
             if err1 ~= 0 || err2 ~= 0
                 error('MCC cbAIn error (err1=%d, err2=%d).', err1, err2);
             end
-            set(statusTxt,'String',sprintf('Digilent/MCC connecté | paire AI%d-%d',ch1,ch2), ...
-              'ForegroundColor','green');
+
+            set(statusTxt,'String',sprintf('Digilent/MCC connecté (USB-1208FS-PLUS) | paire AI%d-%d',ch1,ch2), ...
+                'ForegroundColor','green');
 
         catch ME
             set(statusTxt,'String','Échec de connexion Digilent/MCC','ForegroundColor','red');
@@ -148,7 +164,6 @@ end
 
 function startStopDAQ(src,statusTxt)
     fig = ancestor(src,'figure');
-    popupPair = getappdata(fig,'popupPair');
 
     boardNum = getappdata(fig,'boardNum');
     gain     = getappdata(fig,'gain');
@@ -161,12 +176,17 @@ function startStopDAQ(src,statusTxt)
     hLine1    = getappdata(fig,'hLine_raw1');
     hLine2    = getappdata(fig,'hLine_raw2');
 
-    recTxt = getappdata(fig,'recTxt');
+    popupPair = getappdata(fig,'popupPair');
+    recTxt    = getappdata(fig,'recTxt');
+
+    color_emg1 = getappdata(fig,'color_emg1');
+    color_emg2 = getappdata(fig,'color_emg2');
+    alpha_overlay = getappdata(fig,'alpha_overlay');
 
     ch1 = getappdata(fig,'chanNum1');
     ch2 = getappdata(fig,'chanNum2');
     if isempty(ch1) || isempty(ch2)
-        set(statusTxt,'String','Canaux MCC non définis. (Re)connectez.','ForegroundColor','red');
+        set(statusTxt,'String','Canaux MCC non définis. Changez la paire.','ForegroundColor','red');
         return
     end
 
@@ -174,38 +194,43 @@ function startStopDAQ(src,statusTxt)
     chunkPts  = 200;      % ~0.1 s at 2kHz
 
     if src.Value
+        % --- START ---
         setappdata(fig,'rawBuf',[]);
         setappdata(fig,'sampleIdx',0);
+
         src.String = '⏹ Stop';
         set(popupPair,'Enable','off');
+
         set(recTxt,'String','REC ●');
         setappdata(fig,'recBlinkOn',true);
 
-
+        % Clear panes
         cla(ax_raw1); hold(ax_raw1,'on'); title(ax_raw1,'EMG1 brut'); xlabel(ax_raw1,'Temps (s)'); ylabel(ax_raw1,'Activité (V)');
         cla(ax_raw2); hold(ax_raw2,'on'); title(ax_raw2,'EMG2 brut'); xlabel(ax_raw2,'Temps (s)'); ylabel(ax_raw2,'Activité (V)');
         cla(ax_filt1); title(ax_filt1,'EMG1 filtré (normalisé)'); xlabel(ax_filt1,'Temps (s)'); ylabel(ax_filt1,'(%MVC)');
         cla(ax_filt2); title(ax_filt2,'EMG2 filtré (normalisé)'); xlabel(ax_filt2,'Temps (s)'); ylabel(ax_filt2,'(%MVC)');
 
-        hLine1 = plot(ax_raw1,nan,nan,'-'); setappdata(fig,'hLine_raw1',hLine1);
-        hLine2 = plot(ax_raw2,nan,nan,'-'); setappdata(fig,'hLine_raw2',hLine2);
+        % Live lines with fixed colours
+        hLine1 = plot(ax_raw1,nan,nan,'-','Color',color_emg1); setappdata(fig,'hLine_raw1',hLine1);
+        hLine2 = plot(ax_raw2,nan,nan,'-','Color',color_emg2); setappdata(fig,'hLine_raw2',hLine2);
 
         set(ax_raw1,'XLim',[0, 5]);
         set(ax_raw2,'XLim',[0, 5]);
 
         t = timer('ExecutionMode','fixedSpacing', ...
-                  'Period', chunkPts/Fs, ...
-                  'TimerFcn', @processLiveTick, ...
-                  'ErrorFcn',  @onTimerError);
+            'Period', chunkPts/Fs, ...
+            'TimerFcn', @processLiveTick, ...
+            'ErrorFcn',  @onTimerError);
         setappdata(fig,'liveTimer',t);
         start(t);
 
     else
-        src.String = '● Enregistrer';
+        % --- STOP ---
+        src.String = '⏺ Enregistrer';
         set(popupPair,'Enable','on');
+
         set(recTxt,'String','');
         setappdata(fig,'recBlinkOn',false);
-
 
         t = getappdata(fig,'liveTimer');
         if ~isempty(t) && isa(t,'timer') && isvalid(t)
@@ -217,11 +242,11 @@ function startStopDAQ(src,statusTxt)
         rawBuf = getappdata(fig,'rawBuf');
 
         if ~isempty(rawBuf)
-            ch1sig = rawBuf(:,1);
-            ch2sig = rawBuf(:,2);
+            emg1_raw = rawBuf(:,1);
+            emg2_raw = rawBuf(:,2);
 
-            filt1 = filterEMG(ch1sig);
-            filt2 = filterEMG(ch2sig);
+            filt1 = filterEMG(emg1_raw);
+            filt2 = filterEMG(emg2_raw);
 
             mvc = getappdata(fig,'mvc_values');
             if ~isempty(mvc)
@@ -229,14 +254,36 @@ function startStopDAQ(src,statusTxt)
                 if numel(mvc)>=2 && mvc(2)>0, filt2 = 100 * (filt2 / mvc(2)); end
             end
 
-            tsec = (0:numel(filt1)-1)/Fs;
+            tsec_raw  = (0:numel(emg1_raw)-1)/Fs;
+            tsec_filt = (0:numel(filt1)-1)/Fs;
 
-            cla(ax_filt1); plot(ax_filt1,tsec,filt1);
+            % ---- Show FULL raw EMG, with overlay of the other channel (transparent-ish) ----
+            cla(ax_raw1); hold(ax_raw1,'on');
+            plot(ax_raw1, tsec_raw, emg1_raw, '-', 'Color', color_emg1);
+            h = plot(ax_raw1, tsec_raw, emg2_raw, '-', 'Color', color_emg2);
+            setLineAlphaOrLighten(h, color_emg2, alpha_overlay);
+            title(ax_raw1,'EMG1 brut'); xlabel(ax_raw1,'Temps (s)'); ylabel(ax_raw1,'Activité (V)');
+
+            cla(ax_raw2); hold(ax_raw2,'on');
+            plot(ax_raw2, tsec_raw, emg2_raw, '-', 'Color', color_emg2);
+            h = plot(ax_raw2, tsec_raw, emg1_raw, '-', 'Color', color_emg1);
+            setLineAlphaOrLighten(h, color_emg1, alpha_overlay);
+            title(ax_raw2,'EMG2 brut'); xlabel(ax_raw2,'Temps (s)'); ylabel(ax_raw2,'Activité (V)');
+
+            % ---- Filtered (%MVC), with overlay of the other channel (transparent-ish) ----
+            cla(ax_filt1); hold(ax_filt1,'on');
+            plot(ax_filt1, tsec_filt, filt1, '-', 'Color', color_emg1);
+            h = plot(ax_filt1, tsec_filt, filt2, '-', 'Color', color_emg2);
+            setLineAlphaOrLighten(h, color_emg2, alpha_overlay);
             title(ax_filt1,'EMG1 filtré (normalisé)'); xlabel(ax_filt1,'Temps (s)'); ylabel(ax_filt1,'(%MVC)');
 
-            cla(ax_filt2); plot(ax_filt2,tsec,filt2);
+            cla(ax_filt2); hold(ax_filt2,'on');
+            plot(ax_filt2, tsec_filt, filt2, '-', 'Color', color_emg2);
+            h = plot(ax_filt2, tsec_filt, filt1, '-', 'Color', color_emg1);
+            setLineAlphaOrLighten(h, color_emg1, alpha_overlay);
             title(ax_filt2,'EMG2 filtré (normalisé)'); xlabel(ax_filt2,'Temps (s)'); ylabel(ax_filt2,'(%MVC)');
 
+            % Save recordings
             rec_count = getappdata(fig,'rec_count');
             rec_count = rec_count + 1;
             setappdata(fig,'rec_count',rec_count);
@@ -258,7 +305,7 @@ function startStopDAQ(src,statusTxt)
             assignin('base','EMG2_filtered', filt2);
 
             disp(['Enregistrement #',num2str(rec_count),' sauvegardé (variables : ', ...
-                  baseRawVar,', ',baseF1Var,', ',baseF2Var,').']);
+                baseRawVar,', ',baseF1Var,', ',baseF2Var,').']);
         else
             disp('Aucune donnée enregistrée.');
         end
@@ -270,7 +317,6 @@ function startStopDAQ(src,statusTxt)
 
         v1 = acquireOneChannel(boardNum, ch1, gain, Fs, chunkPts);
         v2 = acquireOneChannel(boardNum, ch2, gain, Fs, chunkPts);
-
         volts = [v1(:), v2(:)];
 
         rawBuf = [rawBuf; volts]; %#ok<AGROW>
@@ -280,7 +326,6 @@ function startStopDAQ(src,statusTxt)
         sampleIdx = sampleIdx + N;
         setappdata(fig,'sampleIdx',sampleIdx);
 
-        % Time window indices
         totalPts = sampleIdx;
         if totalPts <= windowPts
             idx = 1:totalPts;
@@ -296,19 +341,20 @@ function startStopDAQ(src,statusTxt)
         active2 = (std(double(ch2win)) > 1e-6) || (max(abs(ch2win)) > 1e-5);
 
         if active1
-            set(hLine1,'XData',tsec,'YData',ch1win);
+            set(hLine1,'XData',tsec,'YData',ch1win,'Color',color_emg1);
             set(ax_raw1,'XLim',[0, 5]);
         else
             set(hLine1,'XData',nan,'YData',nan);
         end
 
         if active2
-            set(hLine2,'XData',tsec,'YData',ch2win);
+            set(hLine2,'XData',tsec,'YData',ch2win,'Color',color_emg2);
             set(ax_raw2,'XLim',[0, 5]);
         else
             set(hLine2,'XData',nan,'YData',nan);
         end
 
+        % Blink REC
         blink = getappdata(fig,'recBlinkOn');
         if blink
             set(recTxt,'String','');
@@ -316,7 +362,6 @@ function startStopDAQ(src,statusTxt)
             set(recTxt,'String','REC ●');
         end
         setappdata(fig,'recBlinkOn',~blink);
-
 
         drawnow limitrate;
     end
@@ -389,19 +434,13 @@ function measureMVC(figHandle,mvcTxt,chIdx)
     ax_filt1 = getappdata(figHandle,'ax_filt1');
     ax_filt2 = getappdata(figHandle,'ax_filt2');
 
-    mvc = getappdata(figHandle,'mvc_values'); if isempty(mvc), mvc = [0 0]; end
-    if mvc(chIdx) > 0
-        cla(ax_raw1);  title(ax_raw1,'EMG1 brut');  xlabel(ax_raw1,'Temps (s)'); ylabel(ax_raw1,'Activité (V)'); hold(ax_raw1,'on');
-        cla(ax_raw2);  title(ax_raw2,'EMG2 brut');  xlabel(ax_raw2,'Temps (s)'); ylabel(ax_raw2,'Activité (V)'); hold(ax_raw2,'on');
-        cla(ax_filt1); title(ax_filt1,'EMG1 filtré (normalisé)'); xlabel(ax_filt1,'Temps (s)'); ylabel(ax_filt1,'(%MVC)'); hold(ax_filt1,'on');
-        cla(ax_filt2); title(ax_filt2,'EMG2 filtré (normalisé)'); xlabel(ax_filt2,'Temps (s)'); ylabel(ax_filt2,'(%MVC)'); hold(ax_filt2,'on');
-        setappdata(figHandle,'mvc_waveforms',struct('raw1',[],'raw2',[],'env1',[],'env2',[]));
-    end
+    color_emg1 = getappdata(figHandle,'color_emg1');
+    color_emg2 = getappdata(figHandle,'color_emg2');
 
     if chIdx==1
-        targetRaw = ax_raw1; targetFilt = ax_filt1; physCh = ch1; side = 1;
+        targetRaw = ax_raw1; targetFilt = ax_filt1; physCh = ch1; side = 1; col = color_emg1;
     else
-        targetRaw = ax_raw2; targetFilt = ax_filt2; physCh = ch2; side = 2;
+        targetRaw = ax_raw2; targetFilt = ax_filt2; physCh = ch2; side = 2; col = color_emg2;
     end
 
     durSec = 5;
@@ -420,10 +459,10 @@ function measureMVC(figHandle,mvcTxt,chIdx)
     title(targetFilt, sprintf('EMG%d enveloppe MVC', side));
     xlabel(targetFilt,'Temps (s)'); ylabel(targetFilt,'(%MVC)');
 
-    plot(targetRaw, tsec, buf, '-');
+    plot(targetRaw, tsec, buf, '-', 'Color', col);
 
     envFull = sqrt(movmean((buf - mean(buf)).^2, 100));
-    plot(targetFilt, tsec, envFull, '-');
+    plot(targetFilt, tsec, envFull, '-', 'Color', col);
 
     nTake = min(2000, numel(buf));
     topVals = maxk(abs(buf), nTake);
@@ -487,4 +526,16 @@ function exportGraphs(ax_raw1,ax_raw2,ax_filt1,ax_filt2)
         disp('Exportation annulée.');
     end
     close(fig);
+end
+
+function setLineAlphaOrLighten(h, rgb, alpha)
+    % Best-effort "transparency" for lines:
+    % - If your MATLAB supports RGBA for line Color, it will apply true alpha.
+    % - Otherwise, it will lighten the colour toward white to mimic transparency.
+    try
+        set(h,'Color',[rgb alpha]); % works in newer MATLAB versions
+    catch
+        rgb2 = rgb + (1 - rgb) * (1 - alpha); % alpha=0.2 => very light
+        set(h,'Color',rgb2);
+    end
 end
