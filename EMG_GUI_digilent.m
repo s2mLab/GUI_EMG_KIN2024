@@ -1,8 +1,7 @@
 function EMG_GUI_digilent()
 % EMG GUI — Digilent/MCC (USB-1208FS-PLUS) OR TEST MODE (no hardware)
-% FIXES in this version:
-% - Adds the missing measureMVC() function (was referenced but not defined)
-% - Moves top-row controls from y=0.90 to y=0.95 (popup + buttons + labels)
+% This version:
+% - TEST mode streams at REAL TIME speed (chunkPts/Fs) using pause() based on elapsed loop time
 
     f = figure('Name','EMG Acquisition','NumberTitle','off', ...
         'Position',[100,100,900,700],'Units','normalized');
@@ -10,14 +9,14 @@ function EMG_GUI_digilent()
     %% Colours
     color_emg1 = [0 0.4470 0.7410];
     color_emg2 = [0.8500 0.3250 0.0980];
-    alpha_overlay = 0.10;
+    alpha_overlay = 0.20;
     setappdata(f,'color_emg1',color_emg1);
     setappdata(f,'color_emg2',color_emg2);
     setappdata(f,'alpha_overlay',alpha_overlay);
 
     %% Status + MVC + REC
     statusTxt = uicontrol(f,'Style','text','String','Prêt. Activez 🧪 Test si pas de carte.', ...
-        'Units','normalized','Position',[0.05,0.94,0.35,0.04], ...
+        'Units','normalized','Position',[0.05,0.94,0.60,0.04], ...
         'FontSize',12,'HorizontalAlignment','left');
 
     recTxt = uicontrol(f,'Style','text','String','', ...
@@ -31,33 +30,33 @@ function EMG_GUI_digilent()
         'Units','normalized','Position',[0.58,0.94,0.4,0.04], ...
         'FontSize',12,'HorizontalAlignment','left');
 
-    %% Popup pair (moved to y=0.95)
+    %% Popup pair (y=0.905)
     pairList = arrayfun(@(k) sprintf('AI%d-%d',k,k+1), 0:6, 'UniformOutput', false);
     uicontrol(f,'Style','text','String','Paire EMG:', ...
         'Units','normalized','Position',[0.05,0.905,0.08,0.035],'HorizontalAlignment','left');
 
     popupPair = uicontrol(f,'Style','popupmenu','String',pairList, ...
-        'Units','normalized','Position',[0.13,0.9,0.10,0.045], ...
+        'Units','normalized','Position',[0.13,0.905,0.10,0.035], ...
         'FontSize',11,'Value',1, ...
         'Callback',@(~,~) connectDAQ());
     setappdata(f,'popupPair',popupPair);
 
     %% Axes
-    ax_raw1 = axes(f,'Units','normalized','Position',[0.07,0.58,0.40,0.30]); hold(ax_raw1,'on');
+    ax_raw1 = axes(f,'Units','normalized','Position',[0.07,0.53,0.40,0.30]); hold(ax_raw1,'on');
     t = title(ax_raw1,'EMG1 brut'); set(t,'Color',color_emg1);
     xlabel(ax_raw1,'Temps (s)'); ylabel(ax_raw1,'Activité (V)');
     hLine_raw1 = plot(ax_raw1,nan,nan,'-','Color',color_emg1);
 
-    ax_raw2 = axes(f,'Units','normalized','Position',[0.53,0.58,0.40,0.30]); hold(ax_raw2,'on');
+    ax_raw2 = axes(f,'Units','normalized','Position',[0.53,0.53,0.40,0.30]); hold(ax_raw2,'on');
     t = title(ax_raw2,'EMG2 brut'); set(t,'Color',color_emg2);
     xlabel(ax_raw2,'Temps (s)'); ylabel(ax_raw2,'Activité (V)');
     hLine_raw2 = plot(ax_raw2,nan,nan,'-','Color',color_emg2);
 
-    ax_filt1 = axes(f,'Units','normalized','Position',[0.07,0.15,0.40,0.30]); hold(ax_filt1,'on');
+    ax_filt1 = axes(f,'Units','normalized','Position',[0.07,0.1,0.40,0.30]); hold(ax_filt1,'on');
     t = title(ax_filt1,'EMG1 filtré (normalisé)'); set(t,'Color',color_emg1);
     xlabel(ax_filt1,'Temps (s)'); ylabel(ax_filt1,'(%MVC)');
 
-    ax_filt2 = axes(f,'Units','normalized','Position',[0.53,0.15,0.40,0.30]); hold(ax_filt2,'on');
+    ax_filt2 = axes(f,'Units','normalized','Position',[0.53,0.1,0.40,0.30]); hold(ax_filt2,'on');
     t = title(ax_filt2,'EMG2 filtré (normalisé)'); set(t,'Color',color_emg2);
     xlabel(ax_filt2,'Temps (s)'); ylabel(ax_filt2,'(%MVC)');
 
@@ -96,23 +95,23 @@ function EMG_GUI_digilent()
     setappdata(f,'sim_data',[]);
     setappdata(f,'sim_idx_record',1);
 
-    %% Buttons (moved to y=0.95; height already reduced)
+    %% Buttons (y=0.95, height reduced)
     btnTest = uicontrol(f,'Style','togglebutton','String','🧪 Test', ...
-        'Units','normalized','Position',[0.46,0.95,0.07,0.0355],'FontSize',11, ...
+        'Units','normalized','Position',[0.46,0.905,0.07,0.035],'FontSize',11, ...
         'Callback',@(src,~) toggleTestMode(src,statusTxt));
     setappdata(f,'btnTest',btnTest);
 
     btnStart = uicontrol(f,'Style','togglebutton','String','⏺ Enregistrer', ...
-        'Units','normalized','Position',[0.54,0.95,0.20,0.035],'FontSize',12, ...
+        'Units','normalized','Position',[0.54,0.905,0.20,0.035],'FontSize',12, ...
         'Callback',@(src,~) startStopDAQ(src,statusTxt));
     setappdata(f,'btnStart',btnStart);
 
     uicontrol(f,'Style','pushbutton','String','MVC 1', ...
-        'Units','normalized','Position',[0.76,0.95,0.08,0.035],'FontSize',12, ...
+        'Units','normalized','Position',[0.76,0.905,0.08,0.035],'FontSize',12, ...
         'Callback',@(~,~) measureMVC(f,mvcTxt,1));
 
     uicontrol(f,'Style','pushbutton','String','MVC 2', ...
-        'Units','normalized','Position',[0.85,0.95,0.08,0.035],'FontSize',12, ...
+        'Units','normalized','Position',[0.85,0.905,0.08,0.035],'FontSize',12, ...
         'Callback',@(~,~) measureMVC(f,mvcTxt,2));
 
     %% Bottom buttons
@@ -143,7 +142,7 @@ function EMG_GUI_digilent()
         end
 
         if ~(exist('cbAIn','file')==2 || exist('cbAIn','file')==3)
-            set(statusTxt,'String','MCC Universal Library introuvable (cbAIn). Activez 🧪 Test ou installez MCC UL.', ...
+            set(statusTxt,'String','MCC UL introuvable (cbAIn). Activez 🧪 Test ou installez MCC UL.', ...
                 'ForegroundColor','red');
             return
         end
@@ -225,6 +224,7 @@ function startStopDAQ(src,statusTxt)
 
     windowPts = Fs*5;
     chunkPts  = 200;
+    chunkSec  = chunkPts / Fs; % used for real-time streaming in TEST mode
 
     if src.Value
         setappdata(fig,'rawBuf',[]);
@@ -237,10 +237,21 @@ function startStopDAQ(src,statusTxt)
         set(recTxt,'String','REC ●');
         setappdata(fig,'recBlinkOn',true);
 
-        cla(ax_raw1); hold(ax_raw1,'on'); title(ax_raw1,'EMG1 brut'); xlabel(ax_raw1,'Temps (s)'); ylabel(ax_raw1,'Activité (V)');
-        cla(ax_raw2); hold(ax_raw2,'on'); title(ax_raw2,'EMG2 brut'); xlabel(ax_raw2,'Temps (s)'); ylabel(ax_raw2,'Activité (V)');
-        cla(ax_filt1); title(ax_filt1,'EMG1 filtré (normalisé)'); xlabel(ax_filt1,'Temps (s)'); ylabel(ax_filt1,'(%MVC)');
-        cla(ax_filt2); title(ax_filt2,'EMG2 filtré (normalisé)'); xlabel(ax_filt2,'Temps (s)'); ylabel(ax_filt2,'(%MVC)');
+        cla(ax_raw1); hold(ax_raw1,'on');
+        t = title(ax_raw1,'EMG1 brut'); set(t,'Color',color_emg1);
+        xlabel(ax_raw1,'Temps (s)'); ylabel(ax_raw1,'Activité (V)');
+
+        cla(ax_raw2); hold(ax_raw2,'on');
+        t = title(ax_raw2,'EMG2 brut'); set(t,'Color',color_emg2);
+        xlabel(ax_raw2,'Temps (s)'); ylabel(ax_raw2,'Activité (V)');
+
+        cla(ax_filt1); hold(ax_filt1,'on');
+        t = title(ax_filt1,'EMG1 filtré (normalisé)'); set(t,'Color',color_emg1);
+        xlabel(ax_filt1,'Temps (s)'); ylabel(ax_filt1,'(%MVC)');
+
+        cla(ax_filt2); hold(ax_filt2,'on');
+        t = title(ax_filt2,'EMG2 filtré (normalisé)'); set(t,'Color',color_emg2);
+        xlabel(ax_filt2,'Temps (s)'); ylabel(ax_filt2,'(%MVC)');
 
         hLine1 = plot(ax_raw1,nan,nan,'-','Color',color_emg1); setappdata(fig,'hLine_raw1',hLine1);
         hLine2 = plot(ax_raw2,nan,nan,'-','Color',color_emg2); setappdata(fig,'hLine_raw2',hLine2);
@@ -253,29 +264,12 @@ function startStopDAQ(src,statusTxt)
         end
 
         while getappdata(fig,'isRecording') && ishandle(fig)
+            loopTic = tic; % <-- measure loop time for real-time TEST streaming
+
             rawBuf    = getappdata(fig,'rawBuf');
             sampleIdx = getappdata(fig,'sampleIdx');
 
-            if test_mode
-                sim = getappdata(fig,'sim_data');
-                if isempty(sim)
-                    sim = buildSimData(Fs);
-                    setappdata(fig,'sim_data',sim);
-                    setappdata(fig,'sim_idx_record',1);
-                end
-                idx0 = getappdata(fig,'sim_idx_record');
-                idx1 = idx0 + chunkPts - 1;
-                if idx1 > numel(sim.rec1)
-                    setappdata(fig,'isRecording',false);
-                    break
-                end
-                v1 = sim.rec1(idx0:idx1);
-                v2 = sim.rec2(idx0:idx1);
-                setappdata(fig,'sim_idx_record',idx1+1);
-            else
-                v1 = acquireOneChannel(boardNum, ch1, gain, Fs, chunkPts);
-                v2 = acquireOneChannel(boardNum, ch2, gain, Fs, chunkPts);
-            end
+            [v1, v2] = acquireTwoChannelsUnified(fig, ch1, ch2, chunkPts);
 
             volts = [v1(:), v2(:)];
             rawBuf = [rawBuf; volts]; %#ok<AGROW>
@@ -296,18 +290,23 @@ function startStopDAQ(src,statusTxt)
             ch1win = rawBuf(idx,1);
             ch2win = rawBuf(idx,2);
 
-            if ~isempty(ch1win)
-                set(hLine1,'XData',tsec,'YData',ch1win,'Color',color_emg1);
-            end
-            if ~isempty(ch2win)
-                set(hLine2,'XData',tsec,'YData',ch2win,'Color',color_emg2);
-            end
+            set(hLine1,'XData',tsec,'YData',ch1win,'Color',color_emg1);
+            set(hLine2,'XData',tsec,'YData',ch2win,'Color',color_emg2);
 
             blink = getappdata(fig,'recBlinkOn');
             if blink, set(recTxt,'String',''); else, set(recTxt,'String','REC ●'); end
             setappdata(fig,'recBlinkOn',~blink);
 
             drawnow limitrate;
+
+            % --- REAL-TIME pacing for TEST mode ---
+            if test_mode
+                elapsed = toc(loopTic);
+                remaining = chunkSec - elapsed;
+                if remaining > 0
+                    pause(remaining);
+                end
+            end
         end
 
         if src.Value==1 && ~getappdata(fig,'isRecording')
@@ -346,25 +345,34 @@ function startStopDAQ(src,statusTxt)
         plot(ax_raw1,tsec_raw,emg1_raw,'-','Color',color_emg1);
         h = plot(ax_raw1,tsec_raw,emg2_raw,'-','Color',color_emg2);
         setLineAlphaOrLighten(h,color_emg2,alpha_overlay);
-        title(ax_raw1,'EMG1 brut'); xlabel(ax_raw1,'Temps (s)'); ylabel(ax_raw1,'Activité (V)');
+        t = title(ax_raw1,'EMG1 brut'); set(t,'Color',color_emg1);
+        xlabel(ax_raw1,'Temps (s)'); ylabel(ax_raw1,'Activité (V)');
+        set(ax_raw1,'XLim',[tsec_raw(1) tsec_raw(end)]);
 
         cla(ax_raw2); hold(ax_raw2,'on');
         plot(ax_raw2,tsec_raw,emg2_raw,'-','Color',color_emg2);
         h = plot(ax_raw2,tsec_raw,emg1_raw,'-','Color',color_emg1);
         setLineAlphaOrLighten(h,color_emg1,alpha_overlay);
-        title(ax_raw2,'EMG2 brut'); xlabel(ax_raw2,'Temps (s)'); ylabel(ax_raw2,'Activité (V)');
+        t = title(ax_raw2,'EMG2 brut'); set(t,'Color',color_emg2);
+        xlabel(ax_raw2,'Temps (s)'); ylabel(ax_raw2,'Activité (V)');
+        set(ax_raw2,'XLim',[tsec_raw(1) tsec_raw(end)]);
+
 
         cla(ax_filt1); hold(ax_filt1,'on');
         plot(ax_filt1,tsec_filt,filt1,'-','Color',color_emg1);
         h = plot(ax_filt1,tsec_filt,filt2,'-','Color',color_emg2);
         setLineAlphaOrLighten(h,color_emg2,alpha_overlay);
-        title(ax_filt1,'EMG1 filtré (normalisé)'); xlabel(ax_filt1,'Temps (s)'); ylabel(ax_filt1,'(%MVC)');
+        t = title(ax_filt1,'EMG1 filtré (normalisé)'); set(t,'Color',color_emg1);
+        xlabel(ax_filt1,'Temps (s)'); ylabel(ax_filt1,'(%MVC)');
+        set(ax_filt1,'XLim',[tsec_filt(1) tsec_filt(end)]);
 
         cla(ax_filt2); hold(ax_filt2,'on');
         plot(ax_filt2,tsec_filt,filt2,'-','Color',color_emg2);
         h = plot(ax_filt2,tsec_filt,filt1,'-','Color',color_emg1);
         setLineAlphaOrLighten(h,color_emg1,alpha_overlay);
-        title(ax_filt2,'EMG2 filtré (normalisé)'); xlabel(ax_filt2,'Temps (s)'); ylabel(ax_filt2,'(%MVC)');
+        t = title(ax_filt2,'EMG2 filtré (normalisé)'); set(t,'Color',color_emg2);
+        xlabel(ax_filt2,'Temps (s)'); ylabel(ax_filt2,'(%MVC)');
+        set(ax_filt2,'XLim',[tsec_filt(1) tsec_filt(end)]);
 
         rec_count = getappdata(fig,'rec_count') + 1;
         setappdata(fig,'rec_count',rec_count);
@@ -399,10 +407,13 @@ function measureMVC(figHandle,mvcTxt,chIdx)
     ax_filt1 = getappdata(figHandle,'ax_filt1');
     ax_filt2 = getappdata(figHandle,'ax_filt2');
 
+    col1 = getappdata(figHandle,'color_emg1');
+    col2 = getappdata(figHandle,'color_emg2');
+
     if chIdx==1
-        physCh = ch1; side = 1; targetRaw = ax_raw1; targetFilt = ax_filt1;
+        physCh = ch1; side = 1; targetRaw = ax_raw1; targetFilt = ax_filt1; col = col1;
     else
-        physCh = ch2; side = 2; targetRaw = ax_raw2; targetFilt = ax_filt2;
+        physCh = ch2; side = 2; targetRaw = ax_raw2; targetFilt = ax_filt2; col = col2;
     end
 
     durSec = 5;
@@ -410,38 +421,19 @@ function measureMVC(figHandle,mvcTxt,chIdx)
 
     set(mvcTxt,'String',sprintf('Mesure MVC%d en cours (5 s)...',side)); drawnow;
 
-    if test_mode
-        sim = getappdata(figHandle,'sim_data');
-        if isempty(sim)
-            sim = buildSimData(Fs);
-            setappdata(figHandle,'sim_data',sim);
-        end
-        if side==1, buf = sim.mvc1(:); else, buf = sim.mvc2(:); end
-        buf = buf(1:min(nPts,numel(buf)));
-    else
-        if ~(exist('cbAInScan','file')==2 || exist('cbAInScan','file')==3)
-            set(mvcTxt,'String',sprintf('MVC%d impossible: MCC UL manquante.',side));
-            return
-        end
-        buf = acquireOneChannel(boardNum, physCh, gain, Fs, nPts);
-    end
+    buf = acquireMVCUnified(figHandle, physCh, nPts, side);
 
-    t = (0:numel(buf)-1)/Fs;
-
-
-    col1 = getappdata(figHandle,'color_emg1');
-    col2 = getappdata(figHandle,'color_emg2');
-    if side==1, col = col1; else, col = col2; end
+    tsec = (0:numel(buf)-1)/Fs;
 
     cla(targetRaw); hold(targetRaw,'on');
-    plot(targetRaw, t, buf, '-', 'Color', col);
-    title(targetRaw,sprintf('EMG%d MVC (%ds)',side,durSec));
+    plot(targetRaw,tsec,buf,'-','Color',col);
+    tt = title(targetRaw,sprintf('EMG%d MVC (%ds)',side,durSec)); set(tt,'Color',col);
     xlabel(targetRaw,'Temps (s)'); ylabel(targetRaw,'Activité (V)');
 
     env = sqrt(movmean((buf-mean(buf)).^2,100));
     cla(targetFilt); hold(targetFilt,'on');
-    plot(targetFilt, t, env, '-', 'Color', col);
-    title(targetFilt,sprintf('EMG%d enveloppe MVC',side));
+    plot(targetFilt,tsec,env,'-','Color',col);
+    tt = title(targetFilt,sprintf('EMG%d enveloppe MVC',side)); set(tt,'Color',col);
     xlabel(targetFilt,'Temps (s)'); ylabel(targetFilt,'(%MVC)');
 
     nTake = min(2000,numel(buf));
@@ -453,6 +445,108 @@ function measureMVC(figHandle,mvcTxt,chIdx)
     setappdata(figHandle,'mvc_values',mvc);
 
     set(mvcTxt,'String',sprintf('MVC1 = %.2f | MVC2 = %.2f',mvc(1),mvc(2)));
+end
+
+function [v1, v2] = acquireTwoChannelsUnified(figHandle, ch1, ch2, nPts)
+    Fs        = getappdata(figHandle,'Fs');
+    test_mode = getappdata(figHandle,'test_mode');
+
+    if test_mode
+        sim = getappdata(figHandle,'sim_data');
+        if isempty(sim)
+            sim = buildSimData(Fs);
+            setappdata(figHandle,'sim_data',sim);
+            setappdata(figHandle,'sim_idx_record',1);
+        end
+
+        idx0 = getappdata(figHandle,'sim_idx_record');
+        idx1 = idx0 + nPts - 1;
+
+        if idx1 > numel(sim.rec1)
+            v1 = zeros(nPts,1);
+            v2 = zeros(nPts,1);
+            return
+        end
+
+        v1 = sim.rec1(idx0:idx1);
+        v2 = sim.rec2(idx0:idx1);
+
+        % IMPORTANT: avance UNE SEULE FOIS
+        setappdata(figHandle,'sim_idx_record',idx1+1);
+
+    else
+        boardNum = getappdata(figHandle,'boardNum');
+        gain     = getappdata(figHandle,'gain');
+
+        v1 = acquireOneChannel(boardNum, ch1, gain, Fs, nPts);
+        v2 = acquireOneChannel(boardNum, ch2, gain, Fs, nPts);
+    end
+end
+
+
+function v = acquireOneChannelUnified(figHandle, physCh, nPts)
+    Fs       = getappdata(figHandle,'Fs');
+    test_mode = getappdata(figHandle,'test_mode');
+
+    if test_mode
+        sim = getappdata(figHandle,'sim_data');
+        if isempty(sim)
+            sim = buildSimData(Fs);
+            setappdata(figHandle,'sim_data',sim);
+            setappdata(figHandle,'sim_idx_record',1);
+        end
+
+        idx0 = getappdata(figHandle,'sim_idx_record');
+        idx1 = idx0 + nPts - 1;
+
+        if idx1 > numel(sim.rec1)
+            % fin des données => renvoyer des zéros (ou arrêter ailleurs)
+            v = zeros(nPts,1);
+            return
+        end
+
+        % IMPORTANT : on lit "comme une carte" => par canal demandé
+        if physCh == getappdata(figHandle,'chanNum1')
+            v = sim.rec1(idx0:idx1);
+        else
+            v = sim.rec2(idx0:idx1);
+        end
+
+        % On avance UN SEUL compteur global (comme un scan multi-canaux)
+        setappdata(figHandle,'sim_idx_record',idx1+1);
+
+    else
+        boardNum = getappdata(figHandle,'boardNum');
+        gain     = getappdata(figHandle,'gain');
+        v = acquireOneChannel(boardNum, physCh, gain, Fs, nPts);
+    end
+end
+
+function buf = acquireMVCUnified(figHandle, physCh, nPts, side)
+    Fs        = getappdata(figHandle,'Fs');
+    test_mode = getappdata(figHandle,'test_mode');
+
+    if test_mode
+        sim = getappdata(figHandle,'sim_data');
+        if isempty(sim)
+            sim = buildSimData(Fs);
+            setappdata(figHandle,'sim_data',sim);
+        end
+
+        % On lit "comme la carte" : par canal demandé
+        if physCh == getappdata(figHandle,'chanNum1')
+            buf = sim.mvc1(:);
+        else
+            buf = sim.mvc2(:);
+        end
+
+        buf = buf(1:min(nPts,numel(buf)));
+
+    else
+        boardNum = getappdata(figHandle,'boardNum');
+        gain     = getappdata(figHandle,'gain');
+        buf = acquireOneChannel(boardNum, physCh, gain, Fs, nPts);
+    end
 end
 
 
@@ -582,7 +676,7 @@ function sim = buildSimData(Fs)
 
     noiseStd = 0.2;
     f_line   = 60;
-    lineAmp  = 1.3;
+    lineAmp  = 0.3;
 
     % MVC 5s: ramp 1s, hold 3s, rest 1s (amplitude changes; mean ~ 0)
     durMVC = 5; Nmvc = durMVC*Fs; tMVC = (0:Nmvc-1)'/Fs;
@@ -628,3 +722,4 @@ function sim = buildSimData(Fs)
 
     sim = struct('Fs',Fs,'tMVC',tMVC,'mvc1',mvc1,'mvc2',mvc2,'tRec',tRec,'rec1',rec1,'rec2',rec2);
 end
+
