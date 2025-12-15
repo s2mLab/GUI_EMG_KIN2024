@@ -1,18 +1,10 @@
 function EMG_GUI_digilent()
 % EMG GUI — Digilent/MCC (USB-1208FS-PLUS) OR TEST MODE (no hardware)
 %
-% Refactor goals:
-% - Reduce duplicated code (axes reset, plotting, UI state, acquisition loops)
-% - Improve robustness (clean stop on errors, safe close, consistent UI state)
-% - Consistent test-mode streaming for RECORD + MVC using chunking + pause pacing
-%
-% Hardware mode:
-%   - Requires MCC Universal Library for MATLAB (cbAIn, cbAInScan, cbWinBufAlloc, ...)
-%   - Reads a pair of AI channels (AI0-1, AI1-2, ..., AI6-7)
-%
-% Test mode:
-%   - Streams simulated data in real time
-%   - Simulated signals have mean ~0; amplitude changes; one muscle has 60 Hz interference
+% This version:
+% - TEST mode streams at REAL TIME speed using pause() pacing
+% - Recording shows RAW (top) + FILTERED+NORMALISED (bottom) LIVE, like MVC
+% - MVC streaming uses separate sim index (sim_idx_mvc) from recording (sim_idx_record)
 
     f = figure('Name','EMG Acquisition','NumberTitle','off', ...
         'Position',[100,100,900,700],'Units','normalized', ...
@@ -33,7 +25,6 @@ function EMG_GUI_digilent()
 
     setappdata(f,'Fs',Fs);
     setappdata(f,'boardNum',boardNum);
-
     setappdata(f,'gain',getDefaultGain());
 
     setappdata(f,'mvc_values',[0 0]);
@@ -45,14 +36,12 @@ function EMG_GUI_digilent()
     setappdata(f,'isRecording',false);
 
     setappdata(f,'sim_data',[]);
-    setappdata(f,'sim_idx_record',1);  % index for record
-    setappdata(f,'sim_idx_mvc',1);     % index for MVC (separate!)
+    setappdata(f,'sim_idx_record',1);  % record index
+    setappdata(f,'sim_idx_mvc',1);     % MVC index (separate!)
     setappdata(f,'recBlinkOn',false);
 
-    %% Build UI
+    %% Build UI & connect
     buildUI();
-
-    %% Initial connect
     connectDAQ();
 
     % ============================
@@ -98,12 +87,6 @@ function EMG_GUI_digilent()
         setappdata(f,'ax_filt1',ax_filt1);
         setappdata(f,'ax_filt2',ax_filt2);
 
-        % Live line handles (raw only)
-        hLine_raw1 = plot(ax_raw1,nan,nan,'-','Color',color_emg1);
-        hLine_raw2 = plot(ax_raw2,nan,nan,'-','Color',color_emg2);
-        setappdata(f,'hLine_raw1',hLine_raw1);
-        setappdata(f,'hLine_raw2',hLine_raw2);
-
         % Buttons (top row)
         btnTest = uicontrol(f,'Style','togglebutton','String','🧪 Test', ...
             'Units','normalized','Position',[0.46,0.905,0.07,0.035],'FontSize',11, ...
@@ -132,7 +115,7 @@ function EMG_GUI_digilent()
             'Units','normalized','Position',[0.80,0.02,0.18,0.035],'FontSize',12, ...
             'Callback',@(~,~) exportCSV(f));
 
-        % Initial axes labels/titles
+        % Initial axes labels/titles + create live lines
         resetAllAxes('idle');
     end
 
@@ -140,8 +123,7 @@ function EMG_GUI_digilent()
     % UI STATE HELPERS
     % ============================
     function setStatus(msg, colorNameOrRGB)
-        figHandle = f; % stable
-        statusTxt = getappdata(figHandle,'statusTxt');
+        statusTxt = getappdata(f,'statusTxt');
         if isempty(statusTxt) || ~isvalid(statusTxt), return, end
         set(statusTxt,'String',msg);
         if nargin>=2
@@ -150,10 +132,9 @@ function EMG_GUI_digilent()
     end
 
     function setUIState(state)
-        figHandle = f;
-        popupPair = getappdata(figHandle,'popupPair');
-        btnStart  = getappdata(figHandle,'btnStart');
-        recTxt    = getappdata(figHandle,'recTxt');
+        popupPair = getappdata(f,'popupPair');
+        btnStart  = getappdata(f,'btnStart');
+        recTxt    = getappdata(f,'recTxt');
 
         if isempty(popupPair) || ~isvalid(popupPair), return, end
 
@@ -167,7 +148,7 @@ function EMG_GUI_digilent()
                 if ~isempty(recTxt) && isvalid(recTxt)
                     set(recTxt,'String','');
                 end
-                setappdata(figHandle,'recBlinkOn',false);
+                setappdata(f,'recBlinkOn',false);
 
             case 'recording'
                 set(popupPair,'Enable','off');
@@ -177,7 +158,7 @@ function EMG_GUI_digilent()
                 if ~isempty(recTxt) && isvalid(recTxt)
                     set(recTxt,'String','REC ●');
                 end
-                setappdata(figHandle,'recBlinkOn',true);
+                setappdata(f,'recBlinkOn',true);
 
             case 'mvc'
                 set(popupPair,'Enable','off');
@@ -185,11 +166,10 @@ function EMG_GUI_digilent()
     end
 
     function resetAllAxes(context)
-        figHandle = f;
-        ax_raw1  = getappdata(figHandle,'ax_raw1');
-        ax_raw2  = getappdata(figHandle,'ax_raw2');
-        ax_filt1 = getappdata(figHandle,'ax_filt1');
-        ax_filt2 = getappdata(figHandle,'ax_filt2');
+        ax_raw1  = getappdata(f,'ax_raw1');
+        ax_raw2  = getappdata(f,'ax_raw2');
+        ax_filt1 = getappdata(f,'ax_filt1');
+        ax_filt2 = getappdata(f,'ax_filt2');
 
         cla(ax_raw1);  hold(ax_raw1,'on');
         cla(ax_raw2);  hold(ax_raw2,'on');
@@ -201,11 +181,16 @@ function EMG_GUI_digilent()
         applyAxisStyle(ax_filt1, 'EMG1 filtré (normalisé)', color_emg1, '(%MVC)');
         applyAxisStyle(ax_filt2, 'EMG2 filtré (normalisé)', color_emg2, '(%MVC)');
 
-        % Recreate live line handles after clearing
-        hLine_raw1 = plot(ax_raw1,nan,nan,'-','Color',color_emg1);
-        hLine_raw2 = plot(ax_raw2,nan,nan,'-','Color',color_emg2);
-        setappdata(figHandle,'hLine_raw1',hLine_raw1);
-        setappdata(figHandle,'hLine_raw2',hLine_raw2);
+        % Live lines (raw + filt)
+        hLine_raw1  = plot(ax_raw1, nan, nan, '-', 'Color', color_emg1);
+        hLine_raw2  = plot(ax_raw2, nan, nan, '-', 'Color', color_emg2);
+        hLine_filt1 = plot(ax_filt1,nan, nan, '-', 'Color', color_emg1);
+        hLine_filt2 = plot(ax_filt2,nan, nan, '-', 'Color', color_emg2);
+
+        setappdata(f,'hLine_raw1',hLine_raw1);
+        setappdata(f,'hLine_raw2',hLine_raw2);
+        setappdata(f,'hLine_filt1',hLine_filt1);
+        setappdata(f,'hLine_filt2',hLine_filt2);
 
         if any(strcmp(context, {'recording','mvc'}))
             set(ax_raw1,'XLim',[0 5]);
@@ -222,16 +207,27 @@ function EMG_GUI_digilent()
         ylabel(ax,yLabelStr);
     end
 
+    function blinkREC()
+        recTxt = getappdata(f,'recTxt');
+        if isempty(recTxt) || ~isvalid(recTxt), return, end
+        blink = getappdata(f,'recBlinkOn');
+        if blink
+            set(recTxt,'String','');
+        else
+            set(recTxt,'String','REC ●');
+        end
+        setappdata(f,'recBlinkOn',~blink);
+    end
+
     % ============================
     % CONNECT / TEST MODE
     % ============================
     function connectDAQ()
-        figHandle = f;
         [ch1, ch2] = getSelectedPair();
-        setappdata(figHandle,'chanNum1',ch1);
-        setappdata(figHandle,'chanNum2',ch2);
+        setappdata(f,'chanNum1',ch1);
+        setappdata(f,'chanNum2',ch2);
 
-        if getappdata(figHandle,'test_mode')
+        if getappdata(f,'test_mode')
             setStatus(sprintf('Mode TEST (simulé) | paire AI%d-%d',ch1,ch2), [0.2 0.2 0.2]);
             return
         end
@@ -243,8 +239,8 @@ function EMG_GUI_digilent()
 
         try
             try cbErrHandling(0,0); catch, end
-            bn = getappdata(figHandle,'boardNum');
-            gn = getappdata(figHandle,'gain');
+            bn = getappdata(f,'boardNum');
+            gn = getappdata(f,'gain');
             cbAIn(bn, ch1, gn);
             cbAIn(bn, ch2, gn);
             setStatus(sprintf('MCC détectée | paire AI%d-%d',ch1,ch2), 'green');
@@ -255,9 +251,8 @@ function EMG_GUI_digilent()
     end
 
     function toggleTestMode(src)
-        figHandle = f;
-        if getappdata(figHandle,'isRecording')
-            btnStart = getappdata(figHandle,'btnStart');
+        if getappdata(f,'isRecording')
+            btnStart = getappdata(f,'btnStart');
             if ~isempty(btnStart) && isvalid(btnStart)
                 btnStart.Value = 0;
                 startStopDAQ(btnStart);
@@ -265,17 +260,17 @@ function EMG_GUI_digilent()
         end
 
         if src.Value==1
-            setappdata(figHandle,'test_mode',true);
-            sim = buildSimData(getappdata(figHandle,'Fs'));
-            setappdata(figHandle,'sim_data',sim);
-            setappdata(figHandle,'sim_idx_record',1);
-            setappdata(figHandle,'sim_idx_mvc',1);
+            setappdata(f,'test_mode',true);
+            sim = buildSimData(getappdata(f,'Fs'));
+            setappdata(f,'sim_data',sim);
+            setappdata(f,'sim_idx_record',1);
+            setappdata(f,'sim_idx_mvc',1);
             setStatus('Mode TEST activé (données simulées).',[0.2 0.2 0.2]);
         else
-            setappdata(figHandle,'test_mode',false);
-            setappdata(figHandle,'sim_data',[]);
-            setappdata(figHandle,'sim_idx_record',1);
-            setappdata(figHandle,'sim_idx_mvc',1);
+            setappdata(f,'test_mode',false);
+            setappdata(f,'sim_data',[]);
+            setappdata(f,'sim_idx_record',1);
+            setappdata(f,'sim_idx_mvc',1);
             setStatus('Mode TEST désactivé.',[0.2 0.2 0.2]);
         end
         connectDAQ();
@@ -292,18 +287,16 @@ function EMG_GUI_digilent()
     % RECORDING (START/STOP)
     % ============================
     function startStopDAQ(src)
-        figHandle = f;
-
-        test_mode = getappdata(figHandle,'test_mode');
+        test_mode = getappdata(f,'test_mode');
 
         if src.Value
             % START
-            setappdata(figHandle,'rawBuf',[]);
-            setappdata(figHandle,'sampleIdx',0);
-            setappdata(figHandle,'isRecording',true);
+            setappdata(f,'rawBuf',[]);
+            setappdata(f,'sampleIdx',0);
+            setappdata(f,'isRecording',true);
 
             if test_mode
-                setappdata(figHandle,'sim_idx_record',1); % record index reset
+                setappdata(f,'sim_idx_record',1);
             end
 
             resetAllAxes('recording');
@@ -312,14 +305,14 @@ function EMG_GUI_digilent()
             try
                 streamRecording();
             catch ME
-                setappdata(figHandle,'isRecording',false);
+                setappdata(f,'isRecording',false);
                 setUIState('idle');
                 setStatus('Erreur pendant acquisition. Voir console.', 'red');
                 disp(getReport(ME,'extended'));
             end
 
-            if ~getappdata(figHandle,'isRecording')
-                btnStart = getappdata(figHandle,'btnStart');
+            if ~getappdata(f,'isRecording')
+                btnStart = getappdata(f,'btnStart');
                 if ~isempty(btnStart) && isvalid(btnStart) && btnStart.Value==1
                     btnStart.Value = 0;
                     startStopDAQ(btnStart);
@@ -328,10 +321,10 @@ function EMG_GUI_digilent()
 
         else
             % STOP
-            setappdata(figHandle,'isRecording',false);
+            setappdata(f,'isRecording',false);
             setUIState('idle');
 
-            rawBuf = getappdata(figHandle,'rawBuf');
+            rawBuf = getappdata(f,'rawBuf');
             if isempty(rawBuf)
                 return
             end
@@ -341,26 +334,24 @@ function EMG_GUI_digilent()
     end
 
     function streamRecording()
-        figHandle = f;
-
-        Fs = getappdata(figHandle,'Fs');
+        Fs = getappdata(f,'Fs');
         windowPts = Fs*5;
         chunkPts = 200;
         chunkSec = chunkPts / Fs;
 
-        while getappdata(figHandle,'isRecording') && ishandle(figHandle)
+        while getappdata(f,'isRecording') && ishandle(f)
             loopTic = tic;
 
-            rawBuf    = getappdata(figHandle,'rawBuf');
-            sampleIdx = getappdata(figHandle,'sampleIdx');
+            rawBuf    = getappdata(f,'rawBuf');
+            sampleIdx = getappdata(f,'sampleIdx');
 
             block = acquireBlockUnified('record', chunkPts); % Nx2
             rawBuf = [rawBuf; block]; %#ok<AGROW>
-            setappdata(figHandle,'rawBuf',rawBuf);
+            setappdata(f,'rawBuf',rawBuf);
 
             N = size(block,1);
             sampleIdx = sampleIdx + N;
-            setappdata(figHandle,'sampleIdx',sampleIdx);
+            setappdata(f,'sampleIdx',sampleIdx);
 
             totalPts = sampleIdx;
             if totalPts <= windowPts
@@ -370,48 +361,44 @@ function EMG_GUI_digilent()
             end
 
             tsec = (idx-idx(1))/Fs;
+
             ch1win = rawBuf(idx,1);
             ch2win = rawBuf(idx,2);
 
-            updateLiveRawPlots(tsec, ch1win, ch2win);
-            blinkREC();
+            % --- RAW LIVE ---
+            h1 = getappdata(f,'hLine_raw1');
+            h2 = getappdata(f,'hLine_raw2');
+            if ~isempty(h1) && isvalid(h1), set(h1,'XData',tsec,'YData',ch1win,'Color',color_emg1); end
+            if ~isempty(h2) && isvalid(h2), set(h2,'XData',tsec,'YData',ch2win,'Color',color_emg2); end
 
+            % --- FILTERED + NORMALISED LIVE (like MVC) ---
+            mvc = getappdata(f,'mvc_values');
+            if isempty(mvc), mvc = [0 0]; end
+
+            filt1 = filterEMG(ch1win, Fs);
+            filt2 = filterEMG(ch2win, Fs);
+
+            if mvc(1)>0, filt1 = 100*(filt1/mvc(1)); end
+            if mvc(2)>0, filt2 = 100*(filt2/mvc(2)); end
+
+            hf1 = getappdata(f,'hLine_filt1');
+            hf2 = getappdata(f,'hLine_filt2');
+            if ~isempty(hf1) && isvalid(hf1), set(hf1,'XData',tsec,'YData',filt1,'Color',color_emg1); end
+            if ~isempty(hf2) && isvalid(hf2), set(hf2,'XData',tsec,'YData',filt2,'Color',color_emg2); end
+
+            blinkREC();
             drawnow limitrate;
 
-            if getappdata(figHandle,'test_mode')
+            if getappdata(f,'test_mode')
                 elapsed = toc(loopTic);
                 pause(max(0, chunkSec - elapsed));
             end
         end
     end
 
-    function updateLiveRawPlots(tsec, y1, y2)
-        figHandle = f;
-        h1 = getappdata(figHandle,'hLine_raw1');
-        h2 = getappdata(figHandle,'hLine_raw2');
-        if isempty(h1) || ~isvalid(h1) || isempty(h2) || ~isvalid(h2), return, end
-        set(h1,'XData',tsec,'YData',y1,'Color',color_emg1);
-        set(h2,'XData',tsec,'YData',y2,'Color',color_emg2);
-    end
-
-    function blinkREC()
-        figHandle = f;
-        recTxt = getappdata(figHandle,'recTxt');
-        if isempty(recTxt) || ~isvalid(recTxt), return, end
-        blink = getappdata(figHandle,'recBlinkOn');
-        if blink
-            set(recTxt,'String','');
-        else
-            set(recTxt,'String','REC ●');
-        end
-        setappdata(figHandle,'recBlinkOn',~blink);
-    end
-
     function plotFinalAndStore(rawBuf)
-        figHandle = f;
-
-        Fs = getappdata(figHandle,'Fs');
-        mvc = getappdata(figHandle,'mvc_values');
+        Fs = getappdata(f,'Fs');
+        mvc = getappdata(f,'mvc_values');
 
         emg1_raw = rawBuf(:,1);
         emg2_raw = rawBuf(:,2);
@@ -427,37 +414,45 @@ function EMG_GUI_digilent()
         tsec_raw  = (0:numel(emg1_raw)-1)/Fs;
         tsec_filt = (0:numel(filt1)-1)/Fs;
 
-        ax_raw1  = getappdata(figHandle,'ax_raw1');
-        ax_raw2  = getappdata(figHandle,'ax_raw2');
-        ax_filt1 = getappdata(figHandle,'ax_filt1');
-        ax_filt2 = getappdata(figHandle,'ax_filt2');
+        ax_raw1  = getappdata(f,'ax_raw1');
+        ax_raw2  = getappdata(f,'ax_raw2');
+        ax_filt1 = getappdata(f,'ax_filt1');
+        ax_filt2 = getappdata(f,'ax_filt2');
 
         cla(ax_raw1); hold(ax_raw1,'on');
-        plotWithOverlay(ax_raw1, tsec_raw, emg1_raw, emg2_raw, color_emg1, color_emg2, ...
-            'EMG1 brut', 'Activité (V)');
+        plot(ax_raw1, tsec_raw, emg1_raw, '-', 'Color', color_emg1);
+        h = plot(ax_raw1, tsec_raw, emg2_raw, '-', 'Color', color_emg2);
+        setLineAlphaOrLighten(h, color_emg2, alpha_overlay);
+        applyAxisStyle(ax_raw1,'EMG1 brut', color_emg1, 'Activité (V)');
         set(ax_raw1,'XLim',[tsec_raw(1) tsec_raw(end)]);
 
         cla(ax_raw2); hold(ax_raw2,'on');
-        plotWithOverlay(ax_raw2, tsec_raw, emg2_raw, emg1_raw, color_emg2, color_emg1, ...
-            'EMG2 brut', 'Activité (V)');
+        plot(ax_raw2, tsec_raw, emg2_raw, '-', 'Color', color_emg2);
+        h = plot(ax_raw2, tsec_raw, emg1_raw, '-', 'Color', color_emg1);
+        setLineAlphaOrLighten(h, color_emg1, alpha_overlay);
+        applyAxisStyle(ax_raw2,'EMG2 brut', color_emg2, 'Activité (V)');
         set(ax_raw2,'XLim',[tsec_raw(1) tsec_raw(end)]);
 
         cla(ax_filt1); hold(ax_filt1,'on');
-        plotWithOverlay(ax_filt1, tsec_filt, filt1, filt2, color_emg1, color_emg2, ...
-            'EMG1 filtré (normalisé)', '(%MVC)');
+        plot(ax_filt1, tsec_filt, filt1, '-', 'Color', color_emg1);
+        h = plot(ax_filt1, tsec_filt, filt2, '-', 'Color', color_emg2);
+        setLineAlphaOrLighten(h, color_emg2, alpha_overlay);
+        applyAxisStyle(ax_filt1,'EMG1 filtré (normalisé)', color_emg1, '(%MVC)');
         set(ax_filt1,'XLim',[tsec_filt(1) tsec_filt(end)]);
 
         cla(ax_filt2); hold(ax_filt2,'on');
-        plotWithOverlay(ax_filt2, tsec_filt, filt2, filt1, color_emg2, color_emg1, ...
-            'EMG2 filtré (normalisé)', '(%MVC)');
+        plot(ax_filt2, tsec_filt, filt2, '-', 'Color', color_emg2);
+        h = plot(ax_filt2, tsec_filt, filt1, '-', 'Color', color_emg1);
+        setLineAlphaOrLighten(h, color_emg1, alpha_overlay);
+        applyAxisStyle(ax_filt2,'EMG2 filtré (normalisé)', color_emg2, '(%MVC)');
         set(ax_filt2,'XLim',[tsec_filt(1) tsec_filt(end)]);
 
-        rec_count = getappdata(figHandle,'rec_count') + 1;
-        setappdata(figHandle,'rec_count',rec_count);
+        rec_count = getappdata(f,'rec_count') + 1;
+        setappdata(f,'rec_count',rec_count);
 
-        recs = getappdata(figHandle,'recordings_raw');
+        recs = getappdata(f,'recordings_raw');
         recs{rec_count} = rawBuf; %#ok<AGROW>
-        setappdata(figHandle,'recordings_raw',recs);
+        setappdata(f,'recordings_raw',recs);
 
         assignin('base',sprintf('EMG_recording_raw_%02d',rec_count),rawBuf);
         assignin('base',sprintf('EMG1_filtered_%02d',rec_count),filt1);
@@ -470,18 +465,10 @@ function EMG_GUI_digilent()
         setStatus(sprintf('Enregistrement #%02d sauvegardé.', rec_count), [0.2 0.2 0.2]);
     end
 
-    function plotWithOverlay(ax, t, yMain, yOther, colMain, colOther, titleStr, yLabelStr)
-        plot(ax, t, yMain, '-', 'Color', colMain);
-        h = plot(ax, t, yOther, '-', 'Color', colOther);
-        setLineAlphaOrLighten(h, colOther, alpha_overlay);
-        applyAxisStyle(ax, titleStr, colMain, yLabelStr);
-    end
-
     % ============================
     % MVC
     % ============================
     function measureMVC(whichMVC)
-        % Robust figure retrieval (in case callback context changes)
         figHandle = gcbf;
         if isempty(figHandle) || ~ishandle(figHandle)
             figHandle = f;
@@ -490,15 +477,13 @@ function EMG_GUI_digilent()
             return
         end
 
-        % Ensure sim MVC index resets for each MVC in test mode
         if getappdata(figHandle,'test_mode')
-            setappdata(figHandle,'sim_idx_mvc',1);
+            setappdata(figHandle,'sim_idx_mvc',1); % reset MVC stream index
         end
 
         setUIState('mvc');
         setStatus(sprintf('Mesure MVC%d en cours (5 s)...', whichMVC), [0.2 0.2 0.2]);
 
-        % Only reset axes for visual clarity (not mandatory)
         resetAllAxes('mvc');
 
         Fs = getappdata(figHandle,'Fs');
@@ -508,7 +493,6 @@ function EMG_GUI_digilent()
         chunkPts = 200;
         chunkSec = chunkPts / Fs;
 
-        % MVC1 uses EMG1 (col 1), MVC2 uses EMG2 (col 2)
         targetCol = whichMVC;
 
         if whichMVC==1
@@ -594,42 +578,33 @@ function EMG_GUI_digilent()
     end
 
     % ============================
-    % ACQUISITION UNIFIED (TEST/HW)
+    % ACQUISITION UNIFIED
     % ============================
     function block = acquireBlockUnified(kind, nPts)
-        % kind: 'record' or 'mvc'
-        % Returns nPts x 2 [EMG1 EMG2]
-        figHandle = f;
-        Fs = getappdata(figHandle,'Fs');
-        test_mode = getappdata(figHandle,'test_mode');
+        Fs = getappdata(f,'Fs');
+        test_mode = getappdata(f,'test_mode');
 
         if test_mode
-            sim = getappdata(figHandle,'sim_data');
+            sim = getappdata(f,'sim_data');
             if isempty(sim)
                 sim = buildSimData(Fs);
-                setappdata(figHandle,'sim_data',sim);
-                setappdata(figHandle,'sim_idx_record',1);
-                setappdata(figHandle,'sim_idx_mvc',1);
+                setappdata(f,'sim_data',sim);
+                setappdata(f,'sim_idx_record',1);
+                setappdata(f,'sim_idx_mvc',1);
             end
 
             switch kind
                 case 'record'
-                    idx0 = getappdata(figHandle,'sim_idx_record');
+                    idx0 = getappdata(f,'sim_idx_record');
+                    sig1 = sim.rec1; sig2 = sim.rec2;
                 case 'mvc'
-                    idx0 = getappdata(figHandle,'sim_idx_mvc');
+                    idx0 = getappdata(f,'sim_idx_mvc');
+                    sig1 = sim.mvc1; sig2 = sim.mvc2;
                 otherwise
                     error('Unknown acquisition kind: %s', kind);
             end
 
             idx1 = idx0 + nPts - 1;
-
-            switch kind
-                case 'record'
-                    sig1 = sim.rec1; sig2 = sim.rec2;
-                case 'mvc'
-                    sig1 = sim.mvc1; sig2 = sim.mvc2;
-            end
-
             if idx1 > numel(sig1)
                 block = zeros(nPts,2);
                 return
@@ -637,18 +612,17 @@ function EMG_GUI_digilent()
 
             block = [sig1(idx0:idx1), sig2(idx0:idx1)];
 
-            switch kind
-                case 'record'
-                    setappdata(figHandle,'sim_idx_record',idx1+1);
-                case 'mvc'
-                    setappdata(figHandle,'sim_idx_mvc',idx1+1);
+            if strcmp(kind,'record')
+                setappdata(f,'sim_idx_record',idx1+1);
+            else
+                setappdata(f,'sim_idx_mvc',idx1+1);
             end
 
         else
-            bn = getappdata(figHandle,'boardNum');
-            gn = getappdata(figHandle,'gain');
-            ch1 = getappdata(figHandle,'chanNum1');
-            ch2 = getappdata(figHandle,'chanNum2');
+            bn = getappdata(f,'boardNum');
+            gn = getappdata(f,'gain');
+            ch1 = getappdata(f,'chanNum1');
+            ch2 = getappdata(f,'chanNum2');
 
             if ~(exist('cbAInScan','file')==2 || exist('cbAInScan','file')==3)
                 error('cbAInScan introuvable. Installez MCC UL ou activez TEST.');
@@ -661,7 +635,7 @@ function EMG_GUI_digilent()
     end
 
     % ============================
-    % CLOSE HANDLER
+    % CLOSE
     % ============================
     function onClose(~,~)
         setappdata(f,'isRecording',false);
@@ -796,12 +770,13 @@ function exportCSV(figHandle)
     writetable(T, fullfile(path,file));
 end
 
-% =========================================================================
-% PLOTTING HELPER (SIMULATED "ALPHA" VIA LIGHTENING)
-% =========================================================================
 function setLineAlphaOrLighten(h, rgb, alpha)
-    rgb2 = rgb + (1-rgb)*(1-alpha);
-    set(h,'Color',rgb2);
+    try
+        set(h,'Color',[rgb alpha]);
+    catch
+        rgb2 = rgb + (1-rgb)*(1-alpha);
+        set(h,'Color',rgb2);
+    end
 end
 
 % =========================================================================
@@ -833,7 +808,7 @@ function sim = buildSimData(Fs)
     rec1 = noiseStd*randn(Nrec,1);
     rec2 = noiseStd*randn(Nrec,1) + lineAmp*sin(2*pi*f_line*tRec);
 
-    % Muscle1 bursts: 2 bursts of 1.5V, 1s each
+    % Muscle1 bursts
     burstA1 = 1.5; nb1 = round(1.0*Fs);
     starts1 = round([1.0 3.0]*Fs);
     car1 = randn(Nrec,1);
@@ -843,7 +818,7 @@ function sim = buildSimData(Fs)
         rec1(idx) = rec1(idx) + burstA1*car1(idx);
     end
 
-    % Muscle2 bursts: 4 bursts of 0.5V, 0.7s each
+    % Muscle2 bursts
     burstA2 = 0.5; nb2 = round(0.7*Fs);
     starts2 = round([0.6 1.7 2.8 3.9]*Fs);
     car2 = randn(Nrec,1);
