@@ -378,7 +378,7 @@ function startStopDAQ(src,statusTxt)
         setappdata(fig,'rec_count',rec_count);
 
         recs = getappdata(fig,'recordings_raw');
-        recs{rec_count} = rawBuf; %#ok<AGROW>
+        recs{rec_count} = rawBuf; 
         setappdata(fig,'recordings_raw',recs);
 
         assignin('base',sprintf('EMG_recording_raw_%02d',rec_count),rawBuf);
@@ -391,8 +391,9 @@ function startStopDAQ(src,statusTxt)
     end
 end
 
-
 function measureMVC(figHandle,mvcTxt,chIdx)
+% Measure MVC for one channel (5 s). In TEST mode, streams in real time.
+
     Fs = getappdata(figHandle,'Fs');
     test_mode = getappdata(figHandle,'test_mode');
 
@@ -421,20 +422,84 @@ function measureMVC(figHandle,mvcTxt,chIdx)
 
     set(mvcTxt,'String',sprintf('Mesure MVC%d en cours (5 s)...',side)); drawnow;
 
-    buf = acquireMVCUnified(figHandle, physCh, nPts, side);
+    % --- Prepare simulated data if needed ---
+    if test_mode
+        sim = getappdata(figHandle,'sim_data');
+        if isempty(sim)
+            sim = buildSimData(Fs);
+            setappdata(figHandle,'sim_data',sim);
+        end
+        if physCh == getappdata(figHandle,'chanNum1')
+            simVec = sim.mvc1(:);
+        else
+            simVec = sim.mvc2(:);
+        end
+        simVec = simVec(1:min(nPts,numel(simVec)));
+    end
 
-    tsec = (0:numel(buf)-1)/Fs;
+    % --- Prepare axes for LIVE display ---
+    cla(targetRaw);  hold(targetRaw,'on');
+    cla(targetFilt); hold(targetFilt,'on');
 
-    cla(targetRaw); hold(targetRaw,'on');
-    plot(targetRaw,tsec,buf,'-','Color',col);
+    hRaw  = plot(targetRaw,nan,nan,'-','Color',col);
+    hFilt = plot(targetFilt,nan,nan,'-','Color',col);
+
     tt = title(targetRaw,sprintf('EMG%d MVC (%ds)',side,durSec)); set(tt,'Color',col);
     xlabel(targetRaw,'Temps (s)'); ylabel(targetRaw,'Activité (V)');
-
-    env = sqrt(movmean((buf-mean(buf)).^2,100));
-    cla(targetFilt); hold(targetFilt,'on');
-    plot(targetFilt,tsec,env,'-','Color',col);
     tt = title(targetFilt,sprintf('EMG%d enveloppe MVC',side)); set(tt,'Color',col);
     xlabel(targetFilt,'Temps (s)'); ylabel(targetFilt,'(%MVC)');
+
+    set(targetRaw,'XLim',[0 durSec]);
+    set(targetFilt,'XLim',[0 durSec]);
+
+    % --- Acquire / stream ---
+    if test_mode
+        chunkPts = 200;
+        chunkSec = chunkPts / Fs;
+
+        buf = [];
+        idx = 1;
+
+        while idx <= nPts && ishandle(figHandle)
+            loopTic = tic;
+
+            idxEnd = min(idx+chunkPts-1, nPts);
+            newy = simVec(idx:idxEnd);
+
+            buf = [buf; newy]; %#ok<AGROW>
+
+            tsec = (0:numel(buf)-1)/Fs;
+            set(hRaw,'XData',tsec,'YData',buf);
+
+            env = sqrt(movmean((buf-mean(buf)).^2,100));
+            set(hFilt,'XData',tsec,'YData',env);
+
+            drawnow limitrate;
+
+            elapsed = toc(loopTic);
+            pause(max(0, chunkSec - elapsed));
+
+            idx = idxEnd + 1;
+        end
+
+    else
+        % Hardware acquisition (blocking read)
+        buf = acquireOneChannel(boardNum, physCh, gain, Fs, nPts);
+
+        tsec = (0:numel(buf)-1)/Fs;
+        set(hRaw,'XData',tsec,'YData',buf);
+
+        env = sqrt(movmean((buf-mean(buf)).^2,100));
+        set(hFilt,'XData',tsec,'YData',env);
+
+        drawnow;
+    end
+
+    % --- Compute MVC value ---
+    if isempty(buf) || all(~isfinite(buf))
+        set(mvcTxt,'String',sprintf('MVC%d non mesuré (pas de signal).',side));
+        return
+    end
 
     nTake = min(2000,numel(buf));
     topVals = maxk(abs(buf),nTake);
@@ -446,6 +511,7 @@ function measureMVC(figHandle,mvcTxt,chIdx)
 
     set(mvcTxt,'String',sprintf('MVC1 = %.2f | MVC2 = %.2f',mvc(1),mvc(2)));
 end
+
 
 function [v1, v2] = acquireTwoChannelsUnified(figHandle, ch1, ch2, nPts)
     Fs        = getappdata(figHandle,'Fs');
