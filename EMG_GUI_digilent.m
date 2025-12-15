@@ -10,7 +10,7 @@ function EMG_GUI_digilent()
     %% Colours
     color_emg1 = [0 0.4470 0.7410];
     color_emg2 = [0.8500 0.3250 0.0980];
-    alpha_overlay = 0.20;
+    alpha_overlay = 0.10;
     setappdata(f,'color_emg1',color_emg1);
     setappdata(f,'color_emg2',color_emg2);
     setappdata(f,'alpha_overlay',alpha_overlay);
@@ -34,28 +34,32 @@ function EMG_GUI_digilent()
     %% Popup pair (moved to y=0.95)
     pairList = arrayfun(@(k) sprintf('AI%d-%d',k,k+1), 0:6, 'UniformOutput', false);
     uicontrol(f,'Style','text','String','Paire EMG:', ...
-        'Units','normalized','Position',[0.05,0.965,0.08,0.03],'HorizontalAlignment','left');
+        'Units','normalized','Position',[0.05,0.905,0.08,0.035],'HorizontalAlignment','left');
 
     popupPair = uicontrol(f,'Style','popupmenu','String',pairList, ...
-        'Units','normalized','Position',[0.13,0.955,0.10,0.04], ...
+        'Units','normalized','Position',[0.13,0.9,0.10,0.045], ...
         'FontSize',11,'Value',1, ...
         'Callback',@(~,~) connectDAQ());
     setappdata(f,'popupPair',popupPair);
 
     %% Axes
     ax_raw1 = axes(f,'Units','normalized','Position',[0.07,0.58,0.40,0.30]); hold(ax_raw1,'on');
-    title(ax_raw1,'EMG1 brut'); xlabel(ax_raw1,'Temps (s)'); ylabel(ax_raw1,'Activité (V)');
+    t = title(ax_raw1,'EMG1 brut'); set(t,'Color',color_emg1);
+    xlabel(ax_raw1,'Temps (s)'); ylabel(ax_raw1,'Activité (V)');
     hLine_raw1 = plot(ax_raw1,nan,nan,'-','Color',color_emg1);
 
     ax_raw2 = axes(f,'Units','normalized','Position',[0.53,0.58,0.40,0.30]); hold(ax_raw2,'on');
-    title(ax_raw2,'EMG2 brut'); xlabel(ax_raw2,'Temps (s)'); ylabel(ax_raw2,'Activité (V)');
+    t = title(ax_raw2,'EMG2 brut'); set(t,'Color',color_emg2);
+    xlabel(ax_raw2,'Temps (s)'); ylabel(ax_raw2,'Activité (V)');
     hLine_raw2 = plot(ax_raw2,nan,nan,'-','Color',color_emg2);
 
     ax_filt1 = axes(f,'Units','normalized','Position',[0.07,0.15,0.40,0.30]); hold(ax_filt1,'on');
-    title(ax_filt1,'EMG1 filtré (normalisé)'); xlabel(ax_filt1,'Temps (s)'); ylabel(ax_filt1,'(%MVC)');
+    t = title(ax_filt1,'EMG1 filtré (normalisé)'); set(t,'Color',color_emg1);
+    xlabel(ax_filt1,'Temps (s)'); ylabel(ax_filt1,'(%MVC)');
 
     ax_filt2 = axes(f,'Units','normalized','Position',[0.53,0.15,0.40,0.30]); hold(ax_filt2,'on');
-    title(ax_filt2,'EMG2 filtré (normalisé)'); xlabel(ax_filt2,'Temps (s)'); ylabel(ax_filt2,'(%MVC)');
+    t = title(ax_filt2,'EMG2 filtré (normalisé)'); set(t,'Color',color_emg2);
+    xlabel(ax_filt2,'Temps (s)'); ylabel(ax_filt2,'(%MVC)');
 
     setappdata(f,'ax_raw1',ax_raw1);
     setappdata(f,'ax_raw2',ax_raw2);
@@ -94,30 +98,30 @@ function EMG_GUI_digilent()
 
     %% Buttons (moved to y=0.95; height already reduced)
     btnTest = uicontrol(f,'Style','togglebutton','String','🧪 Test', ...
-        'Units','normalized','Position',[0.46,0.955,0.07,0.02],'FontSize',11, ...
+        'Units','normalized','Position',[0.46,0.95,0.07,0.0355],'FontSize',11, ...
         'Callback',@(src,~) toggleTestMode(src,statusTxt));
     setappdata(f,'btnTest',btnTest);
 
     btnStart = uicontrol(f,'Style','togglebutton','String','⏺ Enregistrer', ...
-        'Units','normalized','Position',[0.54,0.955,0.20,0.02],'FontSize',12, ...
+        'Units','normalized','Position',[0.54,0.95,0.20,0.035],'FontSize',12, ...
         'Callback',@(src,~) startStopDAQ(src,statusTxt));
     setappdata(f,'btnStart',btnStart);
 
     uicontrol(f,'Style','pushbutton','String','MVC 1', ...
-        'Units','normalized','Position',[0.76,0.955,0.08,0.02],'FontSize',12, ...
+        'Units','normalized','Position',[0.76,0.95,0.08,0.035],'FontSize',12, ...
         'Callback',@(~,~) measureMVC(f,mvcTxt,1));
 
     uicontrol(f,'Style','pushbutton','String','MVC 2', ...
-        'Units','normalized','Position',[0.85,0.955,0.08,0.02],'FontSize',12, ...
+        'Units','normalized','Position',[0.85,0.95,0.08,0.035],'FontSize',12, ...
         'Callback',@(~,~) measureMVC(f,mvcTxt,2));
 
     %% Bottom buttons
     uicontrol(f,'Style','pushbutton','String','Exporter les graphiques', ...
-        'Units','normalized','Position',[0.60,0.02,0.18,0.03],'FontSize',12, ...
+        'Units','normalized','Position',[0.60,0.02,0.18,0.035],'FontSize',12, ...
         'Callback',@(~,~) exportGraphs(ax_raw1,ax_raw2,ax_filt1,ax_filt2));
 
     uicontrol(f,'Style','pushbutton','String','Exporter CSV', ...
-        'Units','normalized','Position',[0.80,0.02,0.18,0.03],'FontSize',12, ...
+        'Units','normalized','Position',[0.80,0.02,0.18,0.035],'FontSize',12, ...
         'Callback',@(~,~) exportCSV(f));
 
     %% initial channel selection only
@@ -424,14 +428,19 @@ function measureMVC(figHandle,mvcTxt,chIdx)
 
     t = (0:numel(buf)-1)/Fs;
 
+
+    col1 = getappdata(figHandle,'color_emg1');
+    col2 = getappdata(figHandle,'color_emg2');
+    if side==1, col = col1; else, col = col2; end
+
     cla(targetRaw); hold(targetRaw,'on');
-    plot(targetRaw,t,buf,'-');
+    plot(targetRaw, t, buf, '-', 'Color', col);
     title(targetRaw,sprintf('EMG%d MVC (%ds)',side,durSec));
     xlabel(targetRaw,'Temps (s)'); ylabel(targetRaw,'Activité (V)');
 
     env = sqrt(movmean((buf-mean(buf)).^2,100));
     cla(targetFilt); hold(targetFilt,'on');
-    plot(targetFilt,t,env,'-');
+    plot(targetFilt, t, env, '-', 'Color', col);
     title(targetFilt,sprintf('EMG%d enveloppe MVC',side));
     xlabel(targetFilt,'Temps (s)'); ylabel(targetFilt,'(%MVC)');
 
@@ -573,7 +582,7 @@ function sim = buildSimData(Fs)
 
     noiseStd = 0.2;
     f_line   = 60;
-    lineAmp  = 0.3;
+    lineAmp  = 1.3;
 
     % MVC 5s: ramp 1s, hold 3s, rest 1s (amplitude changes; mean ~ 0)
     durMVC = 5; Nmvc = durMVC*Fs; tMVC = (0:Nmvc-1)'/Fs;
