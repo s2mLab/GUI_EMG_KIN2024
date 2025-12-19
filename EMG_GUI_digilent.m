@@ -10,6 +10,10 @@ function EMG_GUI_digilent()
         'Position',[100,100,900,700],'Units','normalized', ...
         'CloseRequestFcn', @onClose);
 
+
+
+
+
     %% Colours & constants
     color_emg1 = [0 0.4470 0.7410];
     color_emg2 = [0.8500 0.3250 0.0980];
@@ -17,6 +21,14 @@ function EMG_GUI_digilent()
 
     Fs = 2000;
     boardNum = 0;
+
+    % --- MCC .NET init (remplace cb* wrappers) ---
+    NET.addAssembly('MccDaq');
+    mcc_board = MccDaq.MccBoard(boardNum);
+    mcc_range = MccDaq.Range.Bip5Volts;  % +/- 5V
+    setappdata(f,'mcc_board',mcc_board);
+    setappdata(f,'mcc_range',mcc_range);
+
 
     %% Store constants/state
     setappdata(f,'color_emg1',color_emg1);
@@ -232,22 +244,27 @@ function EMG_GUI_digilent()
             return
         end
 
-        if ~(exist('cbAIn','file')==2 || exist('cbAIn','file')==3)
-            setStatus('MCC UL introuvable (cbAIn). Activez 🧪 Test ou installez MCC UL.', 'red');
-            return
-        end
-
         try
-            try cbErrHandling(0,0); catch, end
-            bn = getappdata(f,'boardNum');
-            gn = getappdata(f,'gain');
-            cbAIn(bn, ch1, gn);
-            cbAIn(bn, ch2, gn);
-            setStatus(sprintf('MCC détectée | paire AI%d-%d',ch1,ch2), 'green');
+            mcc_board = getappdata(f,'mcc_board');
+            mcc_range = getappdata(f,'mcc_range');
+        
+            [err1, raw1] = mcc_board.AIn(int32(ch1), mcc_range);
+            [err2, raw2] = mcc_board.AIn(int32(ch2), mcc_range);
+        
+            if int32(err1.Value)~=0 || int32(err2.Value)~=0
+                error('Erreur AIn: err1=%d err2=%d', int32(err1.Value), int32(err2.Value));
+            end
+        
+            % juste pour valider conversion possible
+            mcc_board.ToEngUnits(mcc_range, raw1);
+            mcc_board.ToEngUnits(mcc_range, raw2);
+        
+            setStatus(sprintf('MCC détectée (.NET) | paire AI%d-%d',ch1,ch2), 'green');
         catch ME
-            setStatus('Erreur MCC (test lecture). Activez 🧪 Test si besoin.', 'red');
+            setStatus('Erreur MCC (.NET). Activez 🧪 Test si besoin.', 'red');
             disp(getReport(ME,'extended'));
         end
+
     end
 
     function toggleTestMode(src)
@@ -282,6 +299,29 @@ function EMG_GUI_digilent()
         ch1 = pairIdx - 1;
         ch2 = ch1 + 1;
     end
+
+    function block = mccReadBlock(board, range, ch1, ch2, nPts, Fs)
+        block = zeros(nPts,2);
+        t0 = tic;
+        for k = 1:nPts
+            [~, raw1] = board.AIn(int32(ch1), range);
+            [~, v1]   = board.ToEngUnits(range, raw1);
+    
+            [~, raw2] = board.AIn(int32(ch2), range);
+            [~, v2]   = board.ToEngUnits(range, raw2);
+    
+            block(k,:) = [double(v1), double(v2)];
+    
+            % pacing ~ Fs
+            target = k/Fs;
+            dt = toc(t0);
+            if dt < target
+                pause(target - dt);
+            end
+        end
+    end
+
+
 
     % ============================
     % RECORDING (START/STOP)
@@ -619,18 +659,25 @@ function EMG_GUI_digilent()
             end
 
         else
-            bn = getappdata(f,'boardNum');
-            gn = getappdata(f,'gain');
+            mcc_board = getappdata(f,'mcc_board');
+            mcc_range = getappdata(f,'mcc_range');
             ch1 = getappdata(f,'chanNum1');
             ch2 = getappdata(f,'chanNum2');
-
-            if ~(exist('cbAInScan','file')==2 || exist('cbAInScan','file')==3)
-                error('cbAInScan introuvable. Installez MCC UL ou activez TEST.');
+        
+            block = zeros(nPts,2);
+            for k = 1:nPts
+                [err1, raw1] = mcc_board.AIn(int32(ch1), mcc_range);
+                [err2, raw2] = mcc_board.AIn(int32(ch2), mcc_range);
+        
+                if int32(err1.Value)~=0 || int32(err2.Value)~=0
+                    error('Erreur AIn: err1=%d err2=%d', int32(err1.Value), int32(err2.Value));
+                end
+        
+                [~, v1] = mcc_board.ToEngUnits(mcc_range, raw1);
+                [~, v2] = mcc_board.ToEngUnits(mcc_range, raw2);
+        
+                block(k,:) = [double(v1), double(v2)];
             end
-
-            v1 = acquireOneChannel(bn, ch1, gn, Fs, nPts);
-            v2 = acquireOneChannel(bn, ch2, gn, Fs, nPts);
-            block = [v1(:), v2(:)];
         end
     end
 

@@ -1,0 +1,26 @@
+name: emg_mcc
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  # --- Python core ---
+  - python=3.10
+
+  # --- Numerical / signal processing ---
+  - numpy
+  - scipy
+  - pandas
+
+  # --- Plotting / GUI ---
+  - matplotlib
+  - pyqt      # backend GUI robuste (Qt)
+  - pyqtgraph # optionnel mais excellent pour streaming temps réel
+
+  # --- Utilities ---
+  - pip
+  - setuptools
+
+  # --- Pip-only packages ---
+  - pip:
+      - mcculw   # Measurement Computing Universal Library (Python)
