@@ -1,723 +1,823 @@
-# emg_gui_digilent.py
-# Python translation of the provided MATLAB script (structure + behaviour).
-#
-# GUI: PyQt6 + pyqtgraph
-# Filtering: scipy.signal (notch 60Hz + bandpass 20-400Hz) + RMS envelope
-# Test mode: simulated data with separate indices for record vs MVC (like MATLAB version)
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+EMG GUI (Python) — MCC/Digilent USB-1206FS-PLUS (Universal Library / InstaCal) OR TEST MODE
+
+Key features (mirrors your MATLAB GUI logic):
+- Pair selector: AI0-1, AI1-2, ... AI6-7
+- Start/Stop recording: live RAW (top) + live filtered/envelope normalised (%MVC) (bottom)
+- MVC1 / MVC2 acquisition (5 s) streaming in real time
+- Blinking “REC ●” while recording
+- Export PNG of graphs + Export CSV of last recording
+- TEST mode with deterministic simulated EMG (mean ~ 0, amplitude-modulated bursts; 60 Hz line on channel 2)
+
+IMPORTANT ABOUT PERFORMANCE / LAG:
+- Uses a FIXED-SIZE RING BUFFER (last 5 s) for live display (constant cost).
+- Uses a REAL-TIME CLOCK with drift correction (no accumulating lag).
+- Throttles UI updates to ~20 Hz (configurable).
+- Live "filtered" is a lightweight RMS envelope (streaming-friendly).
+  (You can swap to causal IIR filtering later; avoid filtfilt for live.)
+
+Dependencies:
+- Python 3.10+ recommended
+- numpy, scipy, matplotlib
+- For MCC hardware (optional): mcculw (Measurement Computing Universal Library for Python)
+  pip install mcculw
+
+Hardware notes:
+- Uses single-sample AIn reads in a loop for simplicity. For better performance,
+  you can later replace with scan (AInScan) via mcculw.
+"""
 
 from __future__ import annotations
 
-import sys
 import time
 from dataclasses import dataclass
+from time import perf_counter
+from typing import Optional, Tuple
 
 import numpy as np
-from PyQt5 import QtCore, QtWidgets
-import pyqtgraph as pg
-from scipy.signal import iirnotch, butter, filtfilt
+import matplotlib.pyplot as plt
+from matplotlib.widgets import Button, RadioButtons
+from scipy.signal import butter, sosfilt, sosfilt_zi, iirnotch, lfilter
 
-from mcculw import ul
-from mcculw.enums import ULRange, ScanOptions
-from mcculw.ul import ULError
+# =========================
+# CONFIG
+# =========================
+FS = 2000                      # Hz
+WINDOW_SEC = 5                 # seconds shown in live plots
+CHUNK_PTS = 200                # samples per acquisition step (~0.1 s)
+UI_FPS = 20                    # UI refresh rate (Hz) -> ~20 Hz smooth enough
+MVC_DUR_SEC = 5
+RMS_WIN_MS = 100               # for envelope
+RMS_WIN = int(FS * RMS_WIN_MS / 1000)
+
+COLOR_EMG1 = (0.0, 0.4470, 0.7410)
+COLOR_EMG2 = (0.8500, 0.3250, 0.0980)
+ALPHA_OVERLAY = 0.20
+
+# MCC config (change if needed)
+BOARD_NUM = 0
+RANGE_NAME = "BIP5VOLTS"       # +/- 5V range (USB-1206FS-PLUS supports)
+
+# =========================
+# MCC HARDWARE BACKEND (optional)
+# =========================
+class MccBackend:
+    """
+    Minimal MCC UL backend via mcculw.
+    If mcculw is not installed or device not available, you can still run in TEST mode.
+    """
+    def __init__(self, board_num: int = BOARD_NUM, range_name: str = RANGE_NAME):
+        self.board_num = board_num
+        self.range_name = range_name
+        self._ok = False
+
+        try:
+            from mcculw import ul
+            from mcculw.enums import ULRange
+            self.ul = ul
+            self.ULRange = ULRange
+            self.ul_range = getattr(ULRange, range_name)
+            self._ok = True
+        except Exception as e:
+            self._ok = False
+            self._err = e
+
+    @property
+    def available(self) -> bool:
+        return self._ok
+
+    def test_read(self, ch: int) -> float:
+        """Single sample read (volts)."""
+        if not self._ok:
+            raise RuntimeError(f"MCC backend unavailable: {getattr(self,'_err',None)}")
+        # a_in returns engineering units depending on config; for safety we use a_in + to_eng_units
+        # Some UL configurations can return raw counts. We'll handle both.
+        raw = self.ul.a_in(self.board_num, ch, self.ul_range)
+        try:
+            volts = self.ul.to_eng_units(self.board_num, self.ul_range, raw)
+            return float(volts)
+        except Exception:
+            # if ul.a_in already returns volts
+            return float(raw)
+
+    def read_block(self, ch1: int, ch2: int, n: int, fs: int) -> np.ndarray:
+        """Read block as Nx2 volts using repeated single-sample reads (simple, robust)."""
+        block = np.empty((n, 2), dtype=float)
+        # Pace precisely to fs
+        t0 = perf_counter()
+        for k in range(n):
+            v1 = self.test_read(ch1)
+            v2 = self.test_read(ch2)
+            block[k, 0] = v1
+            block[k, 1] = v2
+            target = (k + 1) / fs
+            dt = perf_counter() - t0
+            if dt < target:
+                time.sleep(target - dt)
+        return block
 
 
-
-# ============================
-# SIMULATION GENERATOR
-# ============================
+# =========================
+# SIMULATION BACKEND
+# =========================
 @dataclass
 class SimData:
-    Fs: int
-    tMVC: np.ndarray
+    fs: int
     mvc1: np.ndarray
     mvc2: np.ndarray
-    tRec: np.ndarray
     rec1: np.ndarray
     rec2: np.ndarray
 
 
-def build_sim_data(Fs: int) -> SimData:
-    rng = np.random.default_rng(1)
+def build_sim_data(fs: int = FS, seed: int = 1) -> SimData:
+    rng = np.random.default_rng(seed)
 
     noise_std = 0.2
     f_line = 60.0
     line_amp = 0.3
 
-    # MVC 5s: ramp 1s, hold 3s, rest 1s
-    dur_mvc = 5.0
-    Nmvc = int(dur_mvc * Fs)
-    tMVC = np.arange(Nmvc) / Fs
-
-    env = np.zeros(Nmvc)
-    env[:Fs] = np.linspace(0, 1, Fs)                      # ramp 1s
-    env[Fs:Fs + 3 * Fs] = 1                               # hold 3s
-    env[Fs + 3 * Fs:Fs + 4 * Fs] = 0                      # rest 1s
+    # MVC 5s: ramp 1s, hold 3s, rest 1s (amplitude changes; mean ~ 0)
+    nmvc = MVC_DUR_SEC * fs
+    t_mvc = np.arange(nmvc) / fs
+    env = np.zeros(nmvc)
+    env[:fs] = np.linspace(0, 1, fs)              # ramp
+    env[fs:4 * fs] = 1.0                          # hold 3s
+    env[4 * fs:] = 0.0                            # rest 1s
 
     A1, A2 = 2.0, 3.0
-    mvc1 = (A1 * env) * rng.standard_normal(Nmvc) + noise_std * rng.standard_normal(Nmvc)
-    mvc2 = (A2 * env) * rng.standard_normal(Nmvc) + noise_std * rng.standard_normal(Nmvc) \
-           + line_amp * np.sin(2 * np.pi * f_line * tMVC)
+    mvc1 = (A1 * env) * rng.standard_normal(nmvc) + noise_std * rng.standard_normal(nmvc)
+    mvc2 = (A2 * env) * rng.standard_normal(nmvc) + noise_std * rng.standard_normal(nmvc) \
+           + line_amp * np.sin(2 * np.pi * f_line * t_mvc)
 
     mvc1 -= mvc1.mean()
     mvc2 -= mvc2.mean()
 
     # Recording 5s
-    dur_rec = 5.0
-    Nrec = int(dur_rec * Fs)
-    tRec = np.arange(Nrec) / Fs
+    nrec = WINDOW_SEC * fs
+    t_rec = np.arange(nrec) / fs
 
-    rec1 = noise_std * rng.standard_normal(Nrec)
-    rec2 = noise_std * rng.standard_normal(Nrec) + line_amp * np.sin(2 * np.pi * f_line * tRec)
+    rec1 = noise_std * rng.standard_normal(nrec)
+    rec2 = noise_std * rng.standard_normal(nrec) + line_amp * np.sin(2 * np.pi * f_line * t_rec)
 
-    # Muscle1 bursts: two 1.5V bursts, 1s each
+    # Muscle 1 bursts: two bursts 1.5V, 1s each at 1s and 3s
     burstA1 = 1.5
-    nb1 = int(1.0 * Fs)
-    starts1 = (np.array([1.0, 3.0]) * Fs).astype(int)
-    car1 = rng.standard_normal(Nrec)
+    nb1 = int(1.0 * fs)
+    starts1 = [int(1.0 * fs), int(3.0 * fs)]
+    car1 = rng.standard_normal(nrec)
     for s in starts1:
-        idx = np.arange(s + 1, s + 1 + nb1)
-        idx = idx[idx < Nrec]
+        idx = np.arange(s, min(s + nb1, nrec))
         rec1[idx] += burstA1 * car1[idx]
 
-    # Muscle2 bursts: four 0.5V bursts, 0.7s each
+    # Muscle 2 bursts: four bursts 0.5V, 0.7s each
     burstA2 = 0.5
-    nb2 = int(0.7 * Fs)
-    starts2 = (np.array([0.6, 1.7, 2.8, 3.9]) * Fs).astype(int)
-    car2 = rng.standard_normal(Nrec)
+    nb2 = int(0.7 * fs)
+    starts2 = [int(0.6 * fs), int(1.7 * fs), int(2.8 * fs), int(3.9 * fs)]
+    car2 = rng.standard_normal(nrec)
     for s in starts2:
-        idx = np.arange(s + 1, s + 1 + nb2)
-        idx = idx[idx < Nrec]
+        idx = np.arange(s, min(s + nb2, nrec))
         rec2[idx] += burstA2 * car2[idx]
 
     rec1 -= rec1.mean()
     rec2 -= rec2.mean()
 
-    return SimData(Fs=Fs, tMVC=tMVC, mvc1=mvc1, mvc2=mvc2, tRec=tRec, rec1=rec1, rec2=rec2)
+    return SimData(fs=fs, mvc1=mvc1, mvc2=mvc2, rec1=rec1, rec2=rec2)
 
 
-# ============================
-# FILTERING
-# ============================
-def rms_envelope(x: np.ndarray, win: int = 100) -> np.ndarray:
-    # centred-ish moving RMS (simple causal/zero-phase not required for display)
-    x0 = x - x.mean()
-    x2 = x0 * x0
-    kernel = np.ones(win) / win
-    m = np.convolve(x2, kernel, mode="same")
-    return np.sqrt(np.maximum(m, 0.0))
+class SimBackend:
+    """Streaming simulator with separate indices for recording and MVC (like your MATLAB script)."""
+    def __init__(self, sim: SimData):
+        self.sim = sim
+        self.idx_record = 0
+        self.idx_mvc = 0
+
+    def reset_record(self):
+        self.idx_record = 0
+
+    def reset_mvc(self):
+        self.idx_mvc = 0
+
+    def read_block(self, kind: str, n: int) -> np.ndarray:
+        if kind == "record":
+            sig1, sig2 = self.sim.rec1, self.sim.rec2
+            idx0 = self.idx_record
+        elif kind == "mvc":
+            sig1, sig2 = self.sim.mvc1, self.sim.mvc2
+            idx0 = self.idx_mvc
+        else:
+            raise ValueError("kind must be 'record' or 'mvc'")
+
+        idx1 = idx0 + n
+        if idx1 > len(sig1):
+            block = np.zeros((n, 2))
+        else:
+            block = np.column_stack([sig1[idx0:idx1], sig2[idx0:idx1]])
+
+        if kind == "record":
+            self.idx_record = idx1
+        else:
+            self.idx_mvc = idx1
+        return block
 
 
-def filter_emg(raw: np.ndarray, Fs: int) -> np.ndarray:
-    raw = raw - raw.mean()
-
-    # Notch 60 Hz
-    f0 = 60.0
-    Q = 2.0
-    w0 = f0 / (Fs / 2.0)
-    b_notch, a_notch = iirnotch(w0, Q)
-    emg_notch = filtfilt(b_notch, a_notch, raw)
-
-    # Bandpass 20–400 Hz
-    b_bp, a_bp = butter(4, [20 / (Fs / 2.0), 400 / (Fs / 2.0)], btype="bandpass")
-    emg = filtfilt(b_bp, a_bp, emg_notch)
-
-    # Envelope RMS
-    return rms_envelope(emg, win=100)
-
-
-# ============================
-# HARDWARE ACQUISITION (STUB)
-# ============================
-class HardwareDAQ:
+# =========================
+# STREAMING ENVELOPE FILTER (fast)
+# =========================
+class EnvelopeRMS:
     """
-    MCC Universal Library (mcculw) backend.
-    Requires MCC DAQ Software + InstaCal.
+    Streaming RMS envelope: y = sqrt(movmean((x - mean)^2, win))
+    For streaming: we do a simple high-pass by subtracting running mean (EWMA),
+    then compute RMS with a running window using cumulative sum of squares.
+
+    This is lightweight and avoids filtfilt (good for live).
     """
+    def __init__(self, win: int = RMS_WIN, alpha_mean: float = 0.01):
+        self.win = max(1, int(win))
+        self.alpha_mean = float(alpha_mean)
+        self._mean = 0.0
+        self._sqbuf = np.zeros(self.win, dtype=float)
+        self._sqsum = 0.0
+        self._p = 0
+        self._filled = 0
 
-    def __init__(self, board_num: int = 0, ul_range=ULRange.BIP10VOLTS):
-        self.board_num = board_num
-        self.ul_range = ul_range
+    def process(self, x: np.ndarray) -> np.ndarray:
+        x = np.asarray(x, dtype=float)
+        y = np.empty_like(x)
+        for i, xi in enumerate(x):
+            # EWMA mean removal (keeps mean ~0)
+            self._mean = (1 - self.alpha_mean) * self._mean + self.alpha_mean * xi
+            xc = xi - self._mean
+            sq = xc * xc
 
-    def test_read(self, ch: int) -> None:
-        # Single read to confirm the board + channel works
-        try:
-            _ = ul.a_in(self.board_num, ch, self.ul_range)
-        except ULError as e:
-            raise RuntimeError(f"UL test_read failed on ch{ch}: {e}") from e
+            # ring buffer of squares
+            self._sqsum -= self._sqbuf[self._p]
+            self._sqbuf[self._p] = sq
+            self._sqsum += sq
 
-    def read_block(self, ch1: int, ch2: int, n_pts: int, Fs: int) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Acquire n_pts samples from ch1..ch2 (inclusive).
-        Returns (v1, v2) in volts.
-        """
-        low_chan = min(ch1, ch2)
-        high_chan = max(ch1, ch2)
-        n_ch = high_chan - low_chan + 1
-
-        total_count = n_pts * n_ch
-
-        memhandle = ul.win_buf_alloc(total_count)
-        if memhandle == 0:
-            raise RuntimeError("win_buf_alloc failed")
-
-        try:
-            # Blocking scan (like cbAInScan)
-            ul.a_in_scan(
-                self.board_num,
-                low_chan,
-                high_chan,
-                total_count,
-                Fs,
-                self.ul_range,
-                memhandle,
-                ScanOptions.DEFAULT
-            )
-
-            counts = np.array(ul.win_buf_to_array(memhandle, total_count), dtype=np.int32)
-
-            # Convert counts -> volts
-            volts = np.empty_like(counts, dtype=float)
-            for i, c in enumerate(counts):
-                volts[i] = ul.to_eng_units(self.board_num, self.ul_range, int(c))
-
-            # Deinterleave: UL returns interleaved samples by channel
-            volts = volts.reshape(-1, n_ch)          # shape: (n_pts, n_ch)
-            v1 = volts[:, (ch1 - low_chan)]
-            v2 = volts[:, (ch2 - low_chan)]
-            return v1, v2
-
-        except ULError as e:
-            raise RuntimeError(f"UL scan failed: {e}") from e
-        finally:
-            ul.win_buf_free(memhandle)
+            self._p = (self._p + 1) % self.win
+            self._filled = min(self.win, self._filled + 1)
+            y[i] = np.sqrt(self._sqsum / self._filled)
+        return y
 
 
-# ============================
-# GUI
-# ============================
-class EMGGui(QtWidgets.QWidget):
+# =========================
+# GUI APP
+# =========================
+class EMGApp:
     def __init__(self):
-        super().__init__()
+        self.fs = FS
+        self.window_sec = WINDOW_SEC
+        self.buf_len = int(self.fs * self.window_sec)
 
-        # constants/state
-        self.Fs = 2000
-        self.board_num = 0
-
-        self.color_emg1 = (0, 114, 189)    # approx MATLAB default blue
-        self.color_emg2 = (217, 83, 25)    # approx MATLAB default orange
-        self.alpha_overlay = 0.20
-
+        # State
+        self.test_mode = True
+        self.is_recording = False
         self.mvc_values = np.array([0.0, 0.0], dtype=float)
-        self.rec_count = 0
-        self.recordings_raw: list[np.ndarray] = []
+        self.recordings_raw = []  # list of Nx2 arrays (full recordings)
 
-        self.test_mode = False
+        # Channel pair selection (AI0-1 default)
+        self.pair_idx = 0  # 0..6 => AI0-1..AI6-7
+
+        # Backends
+        self.mcc = MccBackend()
+        self.sim = SimBackend(build_sim_data(self.fs))
+
+        # Live ring buffers (raw + envelope)
+        self.raw1 = np.zeros(self.buf_len, dtype=float)
+        self.raw2 = np.zeros(self.buf_len, dtype=float)
+        self.env1 = np.zeros(self.buf_len, dtype=float)
+        self.env2 = np.zeros(self.buf_len, dtype=float)
+        self._write_pos = 0
+        self._filled = 0
+
+        # Streaming envelope processors (per channel)
+        self.envproc1 = EnvelopeRMS(RMS_WIN)
+        self.envproc2 = EnvelopeRMS(RMS_WIN)
+
+        # UI timing / drift control
+        self.chunk_pts = CHUNK_PTS
+        self.chunk_sec = self.chunk_pts / self.fs
+        self.ui_period = 1.0 / UI_FPS
+        self._next_acq_t = None
+        self._next_ui_t = None
+
+        # Build GUI
+        self._build_ui()
+        self._update_status()
+
+        # Timer-driven loop via matplotlib's event loop
+        self._timer = self.fig.canvas.new_timer(interval=5)  # fast tick; we manage pacing ourselves
+        self._timer.add_callback(self._on_tick)
+        self._timer.start()
+
+    # -------------------------
+    # UI
+    # -------------------------
+    def _build_ui(self):
+        self.fig = plt.figure(figsize=(11, 7))
+        self.fig.canvas.manager.set_window_title("EMG Acquisition (MCC/TEST)")
+        self.fig.subplots_adjust(left=0.06, right=0.98, top=0.90, bottom=0.12, wspace=0.18, hspace=0.35)
+
+        # Status text
+        self.status_text = self.fig.text(0.06, 0.955, "", fontsize=11, ha="left")
+        self.mvc_text = self.fig.text(0.62, 0.955, "", fontsize=11, ha="left")
+        self.rec_text = self.fig.text(0.40, 0.955, "", fontsize=12, ha="left", color="red", weight="bold")
+        self._rec_blink = False
+
+        # Axes
+        self.ax_raw1 = self.fig.add_subplot(2, 2, 1)
+        self.ax_raw2 = self.fig.add_subplot(2, 2, 2)
+        self.ax_env1 = self.fig.add_subplot(2, 2, 3)
+        self.ax_env2 = self.fig.add_subplot(2, 2, 4)
+
+        self._style_axes()
+
+        # Create line artists (update with set_data only)
+        (self.line_raw1,) = self.ax_raw1.plot([], [], color=COLOR_EMG1, lw=1.0)
+        (self.line_raw2,) = self.ax_raw2.plot([], [], color=COLOR_EMG2, lw=1.0)
+        (self.line_env1,) = self.ax_env1.plot([], [], color=COLOR_EMG1, lw=1.0)
+        (self.line_env2,) = self.ax_env2.plot([], [], color=COLOR_EMG2, lw=1.0)
+
+        # Overlay lines (transparent other channel)
+        (self.line_raw1_ol,) = self.ax_raw1.plot([], [], color=COLOR_EMG2, lw=1.0, alpha=ALPHA_OVERLAY)
+        (self.line_raw2_ol,) = self.ax_raw2.plot([], [], color=COLOR_EMG1, lw=1.0, alpha=ALPHA_OVERLAY)
+        (self.line_env1_ol,) = self.ax_env1.plot([], [], color=COLOR_EMG2, lw=1.0, alpha=ALPHA_OVERLAY)
+        (self.line_env2_ol,) = self.ax_env2.plot([], [], color=COLOR_EMG1, lw=1.0, alpha=ALPHA_OVERLAY)
+
+        # Controls area axes
+        ax_pair = self.fig.add_axes([0.06, 0.905, 0.14, 0.05])
+        ax_test = self.fig.add_axes([0.22, 0.905, 0.08, 0.05])
+        ax_rec = self.fig.add_axes([0.31, 0.905, 0.12, 0.05])
+        ax_mvc1 = self.fig.add_axes([0.45, 0.905, 0.08, 0.05])
+        ax_mvc2 = self.fig.add_axes([0.54, 0.905, 0.08, 0.05])
+
+        ax_exp_png = self.fig.add_axes([0.70, 0.02, 0.13, 0.06])
+        ax_exp_csv = self.fig.add_axes([0.85, 0.02, 0.13, 0.06])
+
+        # Pair selector (radio buttons)
+        pair_labels = [f"AI{k}-{k+1}" for k in range(7)]
+        self.rb_pair = RadioButtons(ax_pair, pair_labels, active=self.pair_idx)
+        self.rb_pair.on_clicked(self._on_pair_changed)
+
+        # Test toggle
+        self.btn_test = Button(ax_test, "🧪 Test")
+        self.btn_test.on_clicked(self._on_toggle_test)
+
+        # Record toggle
+        self.btn_rec = Button(ax_rec, "⏺ Enregistrer")
+        self.btn_rec.on_clicked(self._on_toggle_record)
+
+        # MVC buttons
+        self.btn_mvc1 = Button(ax_mvc1, "MVC 1")
+        self.btn_mvc2 = Button(ax_mvc2, "MVC 2")
+        self.btn_mvc1.on_clicked(lambda _evt: self._run_mvc(1))
+        self.btn_mvc2.on_clicked(lambda _evt: self._run_mvc(2))
+
+        # Export buttons
+        self.btn_png = Button(ax_exp_png, "Exporter PNG")
+        self.btn_csv = Button(ax_exp_csv, "Exporter CSV")
+        self.btn_png.on_clicked(self._export_png)
+        self.btn_csv.on_clicked(self._export_csv)
+
+        # Close handler
+        self.fig.canvas.mpl_connect("close_event", self._on_close)
+
+    def _style_axes(self):
+        for ax in (self.ax_raw1, self.ax_raw2, self.ax_env1, self.ax_env2):
+            ax.set_xlim(-self.window_sec, 0.0)
+            ax.grid(True, alpha=0.25)
+            ax.set_xlabel("Temps (s)")
+
+        self.ax_raw1.set_title("EMG1 brut", color=COLOR_EMG1)
+        self.ax_raw2.set_title("EMG2 brut", color=COLOR_EMG2)
+        self.ax_env1.set_title("EMG1 filtré (normalisé)", color=COLOR_EMG1)
+        self.ax_env2.set_title("EMG2 filtré (normalisé)", color=COLOR_EMG2)
+
+        self.ax_raw1.set_ylabel("Activité (V)")
+        self.ax_raw2.set_ylabel("Activité (V)")
+        self.ax_env1.set_ylabel("(%MVC)")
+        self.ax_env2.set_ylabel("(%MVC)")
+
+    def _update_status(self):
+        ch1, ch2 = self._selected_channels()
+        if self.test_mode:
+            self.status_text.set_text(f"Mode TEST (simulé) | paire AI{ch1}-{ch2}")
+        else:
+            if self.mcc.available:
+                self.status_text.set_text(f"Mode HARDWARE (MCC) | paire AI{ch1}-{ch2}")
+            else:
+                self.status_text.set_text("MCC indisponible → restez en TEST (pip install mcculw + InstaCal)")
+        self.mvc_text.set_text(f"MVC1 = {self.mvc_values[0]:.2f} | MVC2 = {self.mvc_values[1]:.2f}")
+
+    def _set_controls_enabled(self, enabled: bool):
+        # Matplotlib widgets don't have a simple enable; we'll gate actions instead.
+        self._controls_enabled = enabled
+
+    # -------------------------
+    # Callbacks
+    # -------------------------
+    def _on_pair_changed(self, label: str):
+        if self.is_recording:
+            return
+        # label "AIx-y"
+        k = int(label.split("AI")[1].split("-")[0])
+        self.pair_idx = k
+        self._update_status()
+
+    def _on_toggle_test(self, _evt):
+        if self.is_recording:
+            return
+        self.test_mode = not self.test_mode
+        if self.test_mode:
+            self.sim.reset_record()
+            self.sim.reset_mvc()
+        self._update_status()
+
+    def _on_toggle_record(self, _evt):
+        if self.is_recording:
+            self._stop_recording()
+        else:
+            self._start_recording()
+
+    def _on_close(self, _evt):
         self.is_recording = False
 
-        self.sim_data: SimData | None = None
-        self.sim_idx_record = 0
-        self.sim_idx_mvc = 0
+    # -------------------------
+    # Recording / Streaming
+    # -------------------------
+    def _start_recording(self):
+        # If hardware requested but not available -> refuse
+        if (not self.test_mode) and (not self.mcc.available):
+            self.status_text.set_text("MCC non disponible. Activez TEST.")
+            return
 
-        self.chunk_pts = 200
-        self.window_sec = 5.0
-        self.window_pts = int(self.window_sec * self.Fs)
-        self.chunk_sec = self.chunk_pts / self.Fs
+        # Reset buffers and processors
+        self.raw1[:] = 0
+        self.raw2[:] = 0
+        self.env1[:] = 0
+        self.env2[:] = 0
+        self._write_pos = 0
+        self._filled = 0
+        self.envproc1 = EnvelopeRMS(RMS_WIN)
+        self.envproc2 = EnvelopeRMS(RMS_WIN)
 
-        self.raw_buf = np.empty((0, 2), dtype=float)
+        self.full_record = []  # list of blocks for later concat
+        self.is_recording = True
+        self.btn_rec.label.set_text("⏹ Stop")
 
-        # hardware (optional)
-        self.hw: HardwareDAQ | None = HardwareDAQ(board_num=self.board_num, ul_range=ULRange.BIP5VOLTS)
+        # Reset simulator index
+        if self.test_mode:
+            self.sim.reset_record()
 
+        # Timing
+        now = perf_counter()
+        self._next_acq_t = now
+        self._next_ui_t = now
 
-        # timer for streaming loop
-        self.timer = QtCore.QTimer(self)
-        self.timer.timeout.connect(self._on_timer_tick)
-        self._last_tick = None
-        self._blink = False
+    def _stop_recording(self):
+        self.is_recording = False
+        self.btn_rec.label.set_text("⏺ Enregistrer")
+        self.rec_text.set_text("")
+        self._rec_blink = False
 
-        self._build_ui()
-        self._connect_daq()
+        if not hasattr(self, "full_record") or len(self.full_record) == 0:
+            return
 
-    # ---------- UI ----------
-    def _build_ui(self):
-        self.setWindowTitle("EMG Acquisition")
+        rawBuf = np.vstack(self.full_record)  # Nx2
+        self.recordings_raw.append(rawBuf)
 
-        # top bar
-        self.status_lbl = QtWidgets.QLabel("Prêt. Activez 🧪 Test si pas de carte.")
-        self.rec_lbl = QtWidgets.QLabel("")
-        self.rec_lbl.setStyleSheet("color: red; font-weight: bold;")
-        self.mvc_lbl = QtWidgets.QLabel("")
+        # Final plots: show full recording (not only last window)
+        self._plot_final(rawBuf)
 
-        # pair popup
-        pair_list = [f"AI{k}-{k+1}" for k in range(0, 7)]
-        self.pair_combo = QtWidgets.QComboBox()
-        self.pair_combo.addItems(pair_list)
-        self.pair_combo.currentIndexChanged.connect(self._connect_daq)
+        self.status_text.set_text(f"Enregistrement sauvegardé ({rawBuf.shape[0]/self.fs:.2f}s).")
 
-        # buttons
-        self.btn_test = QtWidgets.QPushButton("🧪 Test")
-        self.btn_test.setCheckable(True)
-        self.btn_test.clicked.connect(self._toggle_test_mode)
+    def _on_tick(self):
+        """
+        High-frequency tick; we do:
+        - acquire blocks at chunk_sec pacing
+        - update UI at UI_FPS
+        - drift correction: if behind, resync (no accumulating lag)
+        """
+        if not self.is_recording:
+            # still keep MVC text fresh
+            self._update_status()
+            return
 
-        self.btn_record = QtWidgets.QPushButton("⏺ Enregistrer")
-        self.btn_record.setCheckable(True)
-        self.btn_record.clicked.connect(self._start_stop_record)
+        now = perf_counter()
 
-        self.btn_mvc1 = QtWidgets.QPushButton("MVC 1")
-        self.btn_mvc1.clicked.connect(lambda: self._measure_mvc(1))
+        # --- Acquisition step(s): catch up if needed (drop UI frames, but don't accumulate drift) ---
+        # We acquire at fixed chunk pace; if late, do multiple acquisitions without UI update.
+        max_catchup_blocks = 3  # prevent runaway loops
+        n_catch = 0
+        while now >= self._next_acq_t and n_catch < max_catchup_blocks and self.is_recording:
+            block = self._acquire_block(kind="record", n=self.chunk_pts)
+            self.full_record.append(block)
 
-        self.btn_mvc2 = QtWidgets.QPushButton("MVC 2")
-        self.btn_mvc2.clicked.connect(lambda: self._measure_mvc(2))
+            # Update ring buffers with block
+            self._push_block(block)
 
-        self.btn_export_png = QtWidgets.QPushButton("Exporter les graphiques")
-        self.btn_export_png.clicked.connect(self._export_png)
+            self._next_acq_t += self.chunk_sec
+            n_catch += 1
+            now = perf_counter()
 
-        self.btn_export_csv = QtWidgets.QPushButton("Exporter CSV")
-        self.btn_export_csv.clicked.connect(self._export_csv)
+        # If we're very behind, resync acquisition clock to now (prevents growing lag)
+        if now - self._next_acq_t > 0.5:
+            self._next_acq_t = now
 
-        # plots (2x2)
-        pg.setConfigOptions(antialias=True)
-        self.p_raw1 = pg.PlotWidget()
-        self.p_raw2 = pg.PlotWidget()
-        self.p_filt1 = pg.PlotWidget()
-        self.p_filt2 = pg.PlotWidget()
+        # --- UI update throttled ---
+        if now >= self._next_ui_t:
+            self._update_live_lines()
+            self._blink_rec()
+            self.fig.canvas.draw_idle()
+            self._next_ui_t += self.ui_period
+            # If behind, resync UI clock too
+            if now - self._next_ui_t > 0.5:
+                self._next_ui_t = now
 
-        self._reset_axes(context="idle")
+    def _blink_rec(self):
+        self._rec_blink = not self._rec_blink
+        self.rec_text.set_text("" if self._rec_blink else "REC ●")
 
-        # layout
-        top_row = QtWidgets.QHBoxLayout()
-        top_row.addWidget(self.status_lbl, 6)
-        top_row.addWidget(self.rec_lbl, 2)
-        top_row.addWidget(self.mvc_lbl, 4)
-
-        ctrl_row = QtWidgets.QHBoxLayout()
-        ctrl_row.addWidget(QtWidgets.QLabel("Paire EMG:"))
-        ctrl_row.addWidget(self.pair_combo)
-        ctrl_row.addSpacing(20)
-        ctrl_row.addWidget(self.btn_test)
-        ctrl_row.addWidget(self.btn_record)
-        ctrl_row.addWidget(self.btn_mvc1)
-        ctrl_row.addWidget(self.btn_mvc2)
-        ctrl_row.addStretch(1)
-
-        grid = QtWidgets.QGridLayout()
-        grid.addWidget(self.p_raw1, 0, 0)
-        grid.addWidget(self.p_raw2, 0, 1)
-        grid.addWidget(self.p_filt1, 1, 0)
-        grid.addWidget(self.p_filt2, 1, 1)
-
-        bottom_row = QtWidgets.QHBoxLayout()
-        bottom_row.addStretch(1)
-        bottom_row.addWidget(self.btn_export_png)
-        bottom_row.addWidget(self.btn_export_csv)
-
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.addLayout(top_row)
-        layout.addLayout(ctrl_row)
-        layout.addLayout(grid)
-        layout.addLayout(bottom_row)
-
-    def _set_status(self, msg: str, color: str | None = None):
-        self.status_lbl.setText(msg)
-        if color is not None:
-            self.status_lbl.setStyleSheet(f"color: {color};")
-        else:
-            self.status_lbl.setStyleSheet("")
-
-    def _set_ui_state(self, state: str):
-        if state == "idle":
-            self.pair_combo.setEnabled(True)
-            self.btn_record.setChecked(False)
-            self.btn_record.setText("⏺ Enregistrer")
-            self.rec_lbl.setText("")
-            self._blink = False
-
-        elif state == "recording":
-            self.pair_combo.setEnabled(False)
-            self.btn_record.setText("⏹ Stop")
-            self.rec_lbl.setText("REC ●")
-            self._blink = True
-
-        elif state == "mvc":
-            self.pair_combo.setEnabled(False)
-
-    def _reset_axes(self, context: str):
-        # helpers
-        def style_plot(p: pg.PlotWidget, title: str, ylab: str, color_rgb):
-            p.clear()
-            p.setTitle(title, color=color_rgb)
-            p.setLabel("bottom", "Temps (s)")
-            p.setLabel("left", ylab)
-            p.showGrid(x=True, y=True, alpha=0.2)
-            if context in ("recording", "mvc"):
-                p.setXRange(0, 5.0, padding=0)
-
-        c1 = self.color_emg1
-        c2 = self.color_emg2
-        style_plot(self.p_raw1, "EMG1 brut", "Activité (V)", c1)
-        style_plot(self.p_raw2, "EMG2 brut", "Activité (V)", c2)
-        style_plot(self.p_filt1, "EMG1 filtré (normalisé)", "(%MVC)", c1)
-        style_plot(self.p_filt2, "EMG2 filtré (normalisé)", "(%MVC)", c2)
-
-        # live curves
-        self.cur_raw1 = self.p_raw1.plot([], [], pen=pg.mkPen(c1, width=2))
-        self.cur_raw2 = self.p_raw2.plot([], [], pen=pg.mkPen(c2, width=2))
-        self.cur_filt1 = self.p_filt1.plot([], [], pen=pg.mkPen(c1, width=2))
-        self.cur_filt2 = self.p_filt2.plot([], [], pen=pg.mkPen(c2, width=2))
-
-    # ---------- channels ----------
-    def _selected_pair(self) -> tuple[int, int]:
-        idx = self.pair_combo.currentIndex()  # 0..6 corresponds to AI0-1 .. AI6-7
-        ch1 = idx
-        ch2 = idx + 1
+    def _selected_channels(self) -> Tuple[int, int]:
+        ch1 = self.pair_idx
+        ch2 = ch1 + 1
         return ch1, ch2
 
-    # ---------- connect/test ----------
-    def _connect_daq(self):
-        ch1, ch2 = self._selected_pair()
-
+    def _acquire_block(self, kind: str, n: int) -> np.ndarray:
+        ch1, ch2 = self._selected_channels()
         if self.test_mode:
-            self._set_status(f"Mode TEST (simulé) | paire AI{ch1}-{ch2}")
-            return
+            return self.sim.read_block(kind=kind, n=n)
+        # hardware
+        return self.mcc.read_block(ch1=ch1, ch2=ch2, n=n, fs=self.fs)
 
-        # hardware presence test (optional)
-        if self.hw is None:
-            self._set_status("Aucun backend hardware Python configuré. Activez 🧪 Test.", "red")
-            return
+    def _push_block(self, block: np.ndarray):
+        """
+        Push Nx2 block into ring buffers and update streaming envelopes.
+        """
+        x1 = block[:, 0]
+        x2 = block[:, 1]
+        y1 = self.envproc1.process(x1)
+        y2 = self.envproc2.process(x2)
 
-        try:
-            self.hw.test_read(ch1)
-            self.hw.test_read(ch2)
-            self._set_status(f"MCC détectée | paire AI{ch1}-{ch2}", "green")
-        except Exception as e:
-            self._set_status("Erreur hardware (test lecture). Activez 🧪 Test si besoin.", "red")
-            print(e)
-
-    def _toggle_test_mode(self):
-        # stop recording if running
-        if self.is_recording:
-            self.btn_record.setChecked(False)
-            self._start_stop_record()
-
-        self.test_mode = self.btn_test.isChecked()
-
-        if self.test_mode:
-            self.sim_data = build_sim_data(self.Fs)
-            self.sim_idx_record = 0
-            self.sim_idx_mvc = 0
-            self._set_status("Mode TEST activé (données simulées).")
+        n = len(x1)
+        pos = self._write_pos
+        end = pos + n
+        if end <= self.buf_len:
+            self.raw1[pos:end] = x1
+            self.raw2[pos:end] = x2
+            self.env1[pos:end] = y1
+            self.env2[pos:end] = y2
         else:
-            self.sim_data = None
-            self.sim_idx_record = 0
-            self.sim_idx_mvc = 0
-            self._set_status("Mode TEST désactivé.")
-        self._connect_daq()
+            k = self.buf_len - pos
+            self.raw1[pos:] = x1[:k]
+            self.raw2[pos:] = x2[:k]
+            self.env1[pos:] = y1[:k]
+            self.env2[pos:] = y2[:k]
+            r = n - k
+            self.raw1[:r] = x1[k:]
+            self.raw2[:r] = x2[k:]
+            self.env1[:r] = y1[k:]
+            self.env2[:r] = y2[k:]
 
-    # ---------- acquisition unified ----------
-    def _acquire_block_unified(self, kind: str, n_pts: int) -> np.ndarray:
-        ch1, ch2 = self._selected_pair()
+        self._write_pos = (pos + n) % self.buf_len
+        self._filled = min(self.buf_len, self._filled + n)
 
-        if self.test_mode:
-            if self.sim_data is None:
-                self.sim_data = build_sim_data(self.Fs)
-                self.sim_idx_record = 0
-                self.sim_idx_mvc = 0
+    def _get_ring_view(self, arr: np.ndarray) -> np.ndarray:
+        """
+        Return buffer in chronological order (oldest..newest) for plotting.
+        """
+        if self._filled < self.buf_len:
+            return arr[:self._filled].copy()
+        p = self._write_pos
+        return np.concatenate([arr[p:], arr[:p]])
 
-            if kind == "record":
-                sig1, sig2 = self.sim_data.rec1, self.sim_data.rec2
-                idx0 = self.sim_idx_record
-            elif kind == "mvc":
-                sig1, sig2 = self.sim_data.mvc1, self.sim_data.mvc2
-                idx0 = self.sim_idx_mvc
-            else:
-                raise ValueError(f"Unknown kind={kind}")
-
-            idx1 = idx0 + n_pts
-            if idx1 > len(sig1):
-                block = np.zeros((n_pts, 2), dtype=float)
-            else:
-                block = np.column_stack([sig1[idx0:idx1], sig2[idx0:idx1]])
-
-            if kind == "record":
-                self.sim_idx_record = idx1
-            else:
-                self.sim_idx_mvc = idx1
-
-            return block
-
-        # hardware path
-        if self.hw is None:
-            raise RuntimeError("Hardware backend not configured")
-        v1, v2 = self.hw.read_block(ch1, ch2, n_pts, self.Fs)
-        return np.column_stack([np.asarray(v1, float), np.asarray(v2, float)])
-
-    # ---------- recording ----------
-    def _start_stop_record(self):
-        if self.btn_record.isChecked():
-            # START
-            self.raw_buf = np.empty((0, 2), dtype=float)
-            self.is_recording = True
-
-            if self.test_mode:
-                self.sim_idx_record = 0
-
-            self._reset_axes(context="recording")
-            self._set_ui_state("recording")
-
-            self._last_tick = time.perf_counter()
-            self.timer.start(int(1000 * self.chunk_sec))
-
-        else:
-            # STOP
-            self.is_recording = False
-            self.timer.stop()
-            self._set_ui_state("idle")
-
-            if self.raw_buf.size == 0:
-                return
-
-            self._plot_final_and_store()
-
-    def _on_timer_tick(self):
-        # real-time pacing: QTimer is already pacing; keep extra safety for drift
-        if not self.is_recording:
+    def _update_live_lines(self):
+        if self._filled == 0:
             return
 
-        try:
-            block = self._acquire_block_unified("record", self.chunk_pts)
-        except Exception as e:
-            self.is_recording = False
-            self.timer.stop()
-            self._set_ui_state("idle")
-            self._set_status("Erreur pendant acquisition. Voir console.", "red")
-            print(e)
-            return
+        raw1 = self._get_ring_view(self.raw1)
+        raw2 = self._get_ring_view(self.raw2)
+        env1 = self._get_ring_view(self.env1)
+        env2 = self._get_ring_view(self.env2)
 
-        self.raw_buf = np.vstack([self.raw_buf, block])
-
-        # sliding window
-        total_pts = self.raw_buf.shape[0]
-        if total_pts <= self.window_pts:
-            idx0 = 0
-        else:
-            idx0 = total_pts - self.window_pts
-
-        win = self.raw_buf[idx0:total_pts]
-        t = np.arange(win.shape[0]) / self.Fs
-
-        ch1win = win[:, 0]
-        ch2win = win[:, 1]
-
-        # RAW live
-        self.cur_raw1.setData(t, ch1win)
-        self.cur_raw2.setData(t, ch2win)
-
-        # FILTERED + NORMALISED live (like MATLAB)
+        # normalise envelopes to %MVC if available
         mvc1, mvc2 = self.mvc_values
-        f1 = filter_emg(ch1win, self.Fs)
-        f2 = filter_emg(ch2win, self.Fs)
-
+        env1n = env1.copy()
+        env2n = env2.copy()
         if mvc1 > 0:
-            f1 = 100.0 * (f1 / mvc1)
+            env1n = 100.0 * env1n / mvc1
         if mvc2 > 0:
-            f2 = 100.0 * (f2 / mvc2)
+            env2n = 100.0 * env2n / mvc2
 
-        self.cur_filt1.setData(t, f1)
-        self.cur_filt2.setData(t, f2)
+        n = len(raw1)
+        t = np.linspace(-self.window_sec, 0.0, n)
 
-        # blink REC
-        if self._blink:
-            self.rec_lbl.setText("" if self.rec_lbl.text() else "REC ●")
+        # RAW
+        self.line_raw1.set_data(t, raw1)
+        self.line_raw2.set_data(t, raw2)
+        self.line_raw1_ol.set_data(t, raw2)
+        self.line_raw2_ol.set_data(t, raw1)
 
-    def _plot_final_and_store(self):
-        raw = self.raw_buf.copy()
-        emg1 = raw[:, 0]
-        emg2 = raw[:, 1]
+        # ENV
+        self.line_env1.set_data(t, env1n)
+        self.line_env2.set_data(t, env2n)
+        self.line_env1_ol.set_data(t, env2n)
+        self.line_env2_ol.set_data(t, env1n)
 
-        f1 = filter_emg(emg1, self.Fs)
-        f2 = filter_emg(emg2, self.Fs)
+        # Autoscale Y (lightweight): use robust percentiles
+        self._autoscale_y(self.ax_raw1, np.r_[raw1, raw2])
+        self._autoscale_y(self.ax_raw2, np.r_[raw1, raw2])
+        self._autoscale_y(self.ax_env1, np.r_[env1n, env2n], min_span=1.0)
+        self._autoscale_y(self.ax_env2, np.r_[env1n, env2n], min_span=1.0)
 
-        mvc1, mvc2 = self.mvc_values
-        if mvc1 > 0:
-            f1 = 100.0 * (f1 / mvc1)
-        if mvc2 > 0:
-            f2 = 100.0 * (f2 / mvc2)
-
-        t_raw = np.arange(len(emg1)) / self.Fs
-        t_flt = np.arange(len(f1)) / self.Fs
-
-        # redraw full signals + overlay (approx transparency by lighter colour)
-        self.p_raw1.clear()
-        self.p_raw1.setTitle("EMG1 brut", color=self.color_emg1)
-        self.p_raw1.setLabel("bottom", "Temps (s)")
-        self.p_raw1.setLabel("left", "Activité (V)")
-        self.p_raw1.plot(t_raw, emg1, pen=pg.mkPen(self.color_emg1, width=2))
-        self.p_raw1.plot(t_raw, emg2, pen=pg.mkPen((*self._lighten(self.color_emg2, self.alpha_overlay),), width=2))
-
-        self.p_raw2.clear()
-        self.p_raw2.setTitle("EMG2 brut", color=self.color_emg2)
-        self.p_raw2.setLabel("bottom", "Temps (s)")
-        self.p_raw2.setLabel("left", "Activité (V)")
-        self.p_raw2.plot(t_raw, emg2, pen=pg.mkPen(self.color_emg2, width=2))
-        self.p_raw2.plot(t_raw, emg1, pen=pg.mkPen((*self._lighten(self.color_emg1, self.alpha_overlay),), width=2))
-
-        self.p_filt1.clear()
-        self.p_filt1.setTitle("EMG1 filtré (normalisé)", color=self.color_emg1)
-        self.p_filt1.setLabel("bottom", "Temps (s)")
-        self.p_filt1.setLabel("left", "(%MVC)")
-        self.p_filt1.plot(t_flt, f1, pen=pg.mkPen(self.color_emg1, width=2))
-        self.p_filt1.plot(t_flt, f2, pen=pg.mkPen((*self._lighten(self.color_emg2, self.alpha_overlay),), width=2))
-
-        self.p_filt2.clear()
-        self.p_filt2.setTitle("EMG2 filtré (normalisé)", color=self.color_emg2)
-        self.p_filt2.setLabel("bottom", "Temps (s)")
-        self.p_filt2.setLabel("left", "(%MVC)")
-        self.p_filt2.plot(t_flt, f2, pen=pg.mkPen(self.color_emg2, width=2))
-        self.p_filt2.plot(t_flt, f1, pen=pg.mkPen((*self._lighten(self.color_emg1, self.alpha_overlay),), width=2))
-
-        # store
-        self.rec_count += 1
-        self.recordings_raw.append(raw)
-        self._set_status(f"Enregistrement #{self.rec_count:02d} sauvegardé.")
+        self._update_status()
 
     @staticmethod
-    def _lighten(rgb, alpha):
-        # alpha=0 -> original, alpha=1 -> white
-        r, g, b = rgb
-        r2 = int(r + (255 - r) * alpha)
-        g2 = int(g + (255 - g) * alpha)
-        b2 = int(b + (255 - b) * alpha)
-        return r2, g2, b2
+    def _autoscale_y(ax, y, min_span: float = 0.1):
+        y = np.asarray(y)
+        if y.size == 0:
+            return
+        lo, hi = np.percentile(y, [2, 98])
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            return
+        if hi - lo < min_span:
+            mid = 0.5 * (hi + lo)
+            lo = mid - 0.5 * min_span
+            hi = mid + 0.5 * min_span
+        pad = 0.08 * (hi - lo)
+        ax.set_ylim(lo - pad, hi + pad)
 
-    # ---------- MVC ----------
-    def _measure_mvc(self, which: int):
+    # -------------------------
+    # MVC acquisition
+    # -------------------------
+    def _run_mvc(self, which: int):
         if self.is_recording:
-            return  # avoid conflict
+            return
+        if (not self.test_mode) and (not self.mcc.available):
+            self.status_text.set_text("MCC non disponible. Activez TEST.")
+            return
 
-        self._set_ui_state("mvc")
-        self._reset_axes(context="mvc")
-        self._set_status(f"Mesure MVC{which} en cours (5 s)...")
-
+        # Reset sim MVC index
         if self.test_mode:
-            self.sim_idx_mvc = 0
+            self.sim.reset_mvc()
 
-        dur_sec = 5.0
-        n_pts = int(dur_sec * self.Fs)
+        self.status_text.set_text(f"Mesure MVC{which} en cours (5 s)...")
+        self.fig.canvas.draw_idle()
 
-        # stream MVC in real time (like MATLAB) using a local loop + processEvents
+        # Collect for 5 seconds in chunks, in real time
+        n_total = int(MVC_DUR_SEC * self.fs)
         buf = []
+
+        now = perf_counter()
+        next_t = now
         idx = 0
-        t0 = time.perf_counter()
 
-        while idx < n_pts:
-            loop_start = time.perf_counter()
+        # Prepare streaming envelope processors for display (independent)
+        envproc = EnvelopeRMS(RMS_WIN)
 
-            n_this = min(self.chunk_pts, n_pts - idx)
-            block = self._acquire_block_unified("mvc", n_this)
+        while idx < n_total and plt.fignum_exists(self.fig.number):
+            n_this = min(self.chunk_pts, n_total - idx)
 
-            y = block[:, which - 1]
-            buf.append(y)
-            yall = np.concatenate(buf)
+            block = self._acquire_block(kind="mvc", n=n_this)  # Nx2
+            x = block[:, which - 1]  # column 0 or 1
+            env = envproc.process(x)
 
-            t = np.arange(len(yall)) / self.Fs
-            env = rms_envelope(yall, win=100)
+            buf.append(x.copy())
+            x_all = np.concatenate(buf)
 
+            # live plot on appropriate axes
+            t = np.arange(len(x_all)) / self.fs
             if which == 1:
-                self.p_raw1.clear()
-                self.p_raw1.setTitle(f"EMG1 MVC (5s)", color=self.color_emg1)
-                self.p_raw1.setLabel("bottom", "Temps (s)")
-                self.p_raw1.setLabel("left", "Activité (V)")
-                self.p_raw1.plot(t, yall, pen=pg.mkPen(self.color_emg1, width=2))
-
-                self.p_filt1.clear()
-                self.p_filt1.setTitle("EMG1 enveloppe MVC", color=self.color_emg1)
-                self.p_filt1.setLabel("bottom", "Temps (s)")
-                self.p_filt1.setLabel("left", "(%MVC)")
-                self.p_filt1.plot(t, env, pen=pg.mkPen(self.color_emg1, width=2))
+                ax_raw, ax_env = self.ax_raw1, self.ax_env1
+                col = COLOR_EMG1
             else:
-                self.p_raw2.clear()
-                self.p_raw2.setTitle(f"EMG2 MVC (5s)", color=self.color_emg2)
-                self.p_raw2.setLabel("bottom", "Temps (s)")
-                self.p_raw2.setLabel("left", "Activité (V)")
-                self.p_raw2.plot(t, yall, pen=pg.mkPen(self.color_emg2, width=2))
+                ax_raw, ax_env = self.ax_raw2, self.ax_env2
+                col = COLOR_EMG2
 
-                self.p_filt2.clear()
-                self.p_filt2.setTitle("EMG2 enveloppe MVC", color=self.color_emg2)
-                self.p_filt2.setLabel("bottom", "Temps (s)")
-                self.p_filt2.setLabel("left", "(%MVC)")
-                self.p_filt2.plot(t, env, pen=pg.mkPen(self.color_emg2, width=2))
+            ax_raw.cla(); ax_env.cla()
+            ax_raw.set_title(f"EMG{which} MVC (5s)", color=col)
+            ax_env.set_title(f"EMG{which} enveloppe MVC", color=col)
+            ax_raw.set_xlabel("Temps (s)"); ax_env.set_xlabel("Temps (s)")
+            ax_raw.set_ylabel("Activité (V)"); ax_env.set_ylabel("(%MVC)")
 
-            QtWidgets.QApplication.processEvents()
+            ax_raw.plot(t, x_all, color=col, lw=1.0)
+            ax_env.plot(t, envproc.process(x_all), color=col, lw=1.0)
+            ax_raw.set_xlim(0, MVC_DUR_SEC)
+            ax_env.set_xlim(0, MVC_DUR_SEC)
+            ax_raw.grid(True, alpha=0.25)
+            ax_env.grid(True, alpha=0.25)
 
-            # real-time pacing in test mode
-            if self.test_mode:
-                elapsed = time.perf_counter() - loop_start
-                time.sleep(max(0.0, self.chunk_sec - elapsed))
+            self.fig.canvas.draw_idle()
+            plt.pause(0.001)
 
+            # pacing with drift correction
             idx += n_this
+            next_t += n_this / self.fs
+            delay = next_t - perf_counter()
+            if delay > 0:
+                time.sleep(delay)
 
-        yall = np.concatenate(buf)
-        if yall.size == 0 or not np.isfinite(yall).any():
-            self._set_status(f"MVC{which} non mesuré (pas de signal).", "red")
-            self._set_ui_state("idle")
+        x_all = np.concatenate(buf) if buf else np.array([])
+        if x_all.size == 0:
+            self.status_text.set_text(f"MVC{which} non mesuré (pas de signal).")
             return
 
-        n_take = min(2000, yall.size)
-        mvc_val = np.median(np.partition(np.abs(yall), -n_take)[-n_take:])
+        # MVC = median of top 2000 abs samples (like your MATLAB)
+        n_take = min(2000, x_all.size)
+        top_vals = np.partition(np.abs(x_all), -n_take)[-n_take:]
+        mvc_val = float(np.median(top_vals))
         self.mvc_values[which - 1] = mvc_val
-        self.mvc_lbl.setText(f"MVC1 = {self.mvc_values[0]:.2f} | MVC2 = {self.mvc_values[1]:.2f}")
 
-        self._set_status(f"MVC{which} mesuré.")
-        self._set_ui_state("idle")
+        self.status_text.set_text(f"MVC{which} mesuré.")
+        self._update_status()
+        self.fig.canvas.draw_idle()
 
-    # ---------- exports ----------
-    def _export_csv(self):
-        if not self.recordings_raw:
-            return
-        raw = self.recordings_raw[-1]
-        emg1 = raw[:, 0]
-        emg2 = raw[:, 1]
+    # -------------------------
+    # Final plots and exports
+    # -------------------------
+    def _plot_final(self, rawBuf: np.ndarray):
+        """
+        Show full raw + envelope normalised on all axes (with overlays).
+        """
+        emg1 = rawBuf[:, 0]
+        emg2 = rawBuf[:, 1]
+        t = np.arange(rawBuf.shape[0]) / self.fs
 
-        f1 = filter_emg(emg1, self.Fs)
-        f2 = filter_emg(emg2, self.Fs)
+        # final envelope (same as live approach, deterministic)
+        envproc1 = EnvelopeRMS(RMS_WIN)
+        envproc2 = EnvelopeRMS(RMS_WIN)
+        env1 = envproc1.process(emg1)
+        env2 = envproc2.process(emg2)
 
         mvc1, mvc2 = self.mvc_values
-        if mvc1 > 0:
-            f1 = 100.0 * (f1 / mvc1)
-        if mvc2 > 0:
-            f2 = 100.0 * (f2 / mvc2)
+        env1n = 100.0 * env1 / mvc1 if mvc1 > 0 else env1
+        env2n = 100.0 * env2 / mvc2 if mvc2 > 0 else env2
 
-        t = np.arange(raw.shape[0]) / self.Fs
-        data = np.column_stack([t, emg1, emg2, f1, f2])
+        # Raw axes
+        self.ax_raw1.cla(); self.ax_raw2.cla()
+        self.ax_env1.cla(); self.ax_env2.cla()
 
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Exporter CSV sous...", filter="CSV (*.csv)")
-        if not path:
+        self.ax_raw1.plot(t, emg1, color=COLOR_EMG1, lw=1.0)
+        self.ax_raw1.plot(t, emg2, color=COLOR_EMG2, lw=1.0, alpha=ALPHA_OVERLAY)
+        self.ax_raw1.set_title("EMG1 brut", color=COLOR_EMG1)
+        self.ax_raw1.set_xlabel("Temps (s)"); self.ax_raw1.set_ylabel("Activité (V)")
+        self.ax_raw1.grid(True, alpha=0.25)
+
+        self.ax_raw2.plot(t, emg2, color=COLOR_EMG2, lw=1.0)
+        self.ax_raw2.plot(t, emg1, color=COLOR_EMG1, lw=1.0, alpha=ALPHA_OVERLAY)
+        self.ax_raw2.set_title("EMG2 brut", color=COLOR_EMG2)
+        self.ax_raw2.set_xlabel("Temps (s)"); self.ax_raw2.set_ylabel("Activité (V)")
+        self.ax_raw2.grid(True, alpha=0.25)
+
+        # Env axes
+        self.ax_env1.plot(t, env1n, color=COLOR_EMG1, lw=1.0)
+        self.ax_env1.plot(t, env2n, color=COLOR_EMG2, lw=1.0, alpha=ALPHA_OVERLAY)
+        self.ax_env1.set_title("EMG1 filtré (normalisé)", color=COLOR_EMG1)
+        self.ax_env1.set_xlabel("Temps (s)"); self.ax_env1.set_ylabel("(%MVC)")
+        self.ax_env1.grid(True, alpha=0.25)
+
+        self.ax_env2.plot(t, env2n, color=COLOR_EMG2, lw=1.0)
+        self.ax_env2.plot(t, env1n, color=COLOR_EMG1, lw=1.0, alpha=ALPHA_OVERLAY)
+        self.ax_env2.set_title("EMG2 filtré (normalisé)", color=COLOR_EMG2)
+        self.ax_env2.set_xlabel("Temps (s)"); self.ax_env2.set_ylabel("(%MVC)")
+        self.ax_env2.grid(True, alpha=0.25)
+
+        self.fig.canvas.draw_idle()
+
+    def _export_png(self, _evt):
+        fname = time.strftime("emg_graphs_%Y%m%d_%H%M%S.png")
+        self.fig.savefig(fname, dpi=150)
+        self.status_text.set_text(f"PNG exporté: {fname}")
+
+    def _export_csv(self, _evt):
+        if not self.recordings_raw:
+            self.status_text.set_text("Aucun enregistrement à exporter.")
             return
+        rawBuf = self.recordings_raw[-1]
+        t = np.arange(rawBuf.shape[0]) / self.fs
+        emg1 = rawBuf[:, 0]
+        emg2 = rawBuf[:, 1]
 
-        header = "time_s,emg1_raw_V,emg2_raw_V,emg1_filt_pctMVC,emg2_filt_pctMVC"
-        np.savetxt(path, data, delimiter=",", header=header, comments="", fmt="%.6f")
+        envproc1 = EnvelopeRMS(RMS_WIN)
+        envproc2 = EnvelopeRMS(RMS_WIN)
+        env1 = envproc1.process(emg1)
+        env2 = envproc2.process(emg2)
 
-    def _export_png(self):
-        # Simple: screenshot the widget (works cross-platform)
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Exporter les graphiques sous...", filter="PNG (*.png)")
-        if not path:
-            return
-        pix = self.grab()
-        pix.save(path, "PNG")
+        mvc1, mvc2 = self.mvc_values
+        env1n = 100.0 * env1 / mvc1 if mvc1 > 0 else env1
+        env2n = 100.0 * env2 / mvc2 if mvc2 > 0 else env2
 
-    # ---------- close ----------
-    def closeEvent(self, event):
-        self.is_recording = False
-        self.timer.stop()
-        event.accept()
+        out = np.column_stack([t, emg1, emg2, env1n, env2n])
+        fname = time.strftime("emg_last_%Y%m%d_%H%M%S.csv")
+        header = "time_s,emg1_raw_V,emg2_raw_V,emg1_env_pctMVC,emg2_env_pctMVC"
+        np.savetxt(fname, out, delimiter=",", header=header, comments="")
+        self.status_text.set_text(f"CSV exporté: {fname}")
 
 
 def main():
-    app = QtWidgets.QApplication(sys.argv)
-    w = EMGGui()
-    w.resize(1000, 750)
-    w.show()
-    sys.exit(app.exec())
+    app = EMGApp()
+    plt.show()
 
 
 if __name__ == "__main__":
