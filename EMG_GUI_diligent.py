@@ -257,7 +257,8 @@ class EnvelopeRMS:
 
             self._p = (self._p + 1) % self.win
             self._filled = min(self.win, self._filled + 1)
-            y[i] = np.sqrt(self._sqsum / self._filled)
+            y[i] = np.sqrt(max(0.0, self._sqsum / self._filled))
+
         return y
 
 
@@ -361,11 +362,11 @@ class EMGApp:
         self.rb_pair.on_clicked(self._on_pair_changed)
 
         # Test toggle
-        self.btn_test = Button(ax_test, "🧪 Test")
+        self.btn_test = Button(ax_test, "Mode Test")
         self.btn_test.on_clicked(self._on_toggle_test)
 
         # Record toggle
-        self.btn_rec = Button(ax_rec, "⏺ Enregistrer")
+        self.btn_rec = Button(ax_rec, "Enregistrer")
         self.btn_rec.on_clicked(self._on_toggle_record)
 
         # MVC buttons
@@ -464,7 +465,7 @@ class EMGApp:
 
         self.full_record = []  # list of blocks for later concat
         self.is_recording = True
-        self.btn_rec.label.set_text("⏹ Stop")
+        self.btn_rec.label.set_text("Stop")
 
         # Reset simulator index
         if self.test_mode:
@@ -477,7 +478,7 @@ class EMGApp:
 
     def _stop_recording(self):
         self.is_recording = False
-        self.btn_rec.label.set_text("⏺ Enregistrer")
+        self.btn_rec.label.set_text("Enregistrer")
         self.rec_text.set_text("")
         self._rec_blink = False
 
