@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-EMG GUI (Python) — MCC/Digilent USB-1206FS-PLUS (Universal Library / InstaCal) OR TEST MODE
+EMG GUI (Python) — MCC USB-1206FS-PLUS (mcculw + InstaCal) OR TEST MODE
 
-Améliorations vs ton code actuel:
-- Mode TEST = CheckBox (au lieu d'un bouton)
-- Affichage plus fluide (évite concat/percentile à chaque refresh)
-- Autoscale Y en temps réel, par axe, avec lissage + fréquence limitée
-- MVC: pas de cla() en boucle (mise à jour de lignes existantes)
+Corrections demandées:
+- Pendant l'acquisition ("Enregistrer"), chaque subplot n'affiche QUE son EMG (pas d'overlay).
+- Les 2 courbes (overlay) ne s'affichent qu'APRES avoir stoppé l'acquisition (affichage final).
+- Texte MVC déplacé vers la droite.
+- Autoscale Y en temps réel (axes bruts + filtrés) avec lissage et fréquence limitée.
+- Supprime les emojis (évite warnings de glyphes).
+- Rend l'UI plus fluide: ring buffer + copies sans concat, autoscale limité, draw_idle.
+
+Basé sur ton code fourni. :contentReference[oaicite:0]{index=0}
 """
 
 from __future__ import annotations
@@ -15,7 +19,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Tuple
+from typing import Tuple, Optional
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -27,16 +31,16 @@ from matplotlib.widgets import Button, RadioButtons, CheckButtons
 FS = 2000
 WINDOW_SEC = 5
 CHUNK_PTS = 200                 # ~0.1 s
-UI_FPS = 25                     # UI refresh ~25 Hz (fluide)
+UI_FPS = 25                     # UI refresh rate
 MVC_DUR_SEC = 5
 
 RMS_WIN_MS = 100
 RMS_WIN = int(FS * RMS_WIN_MS / 1000)
 
 # Autoscale
-AUTOSCALE_HZ = 6                # autoscale pas à chaque frame (coût)
-AUTOSCALE_SMOOTH = 0.25         # lissage limites
-AUTOSCALE_CHANGE_FRAC = 0.03    # si changement <3% => ne pas bouger les limites
+AUTOSCALE_HZ = 6
+AUTOSCALE_SMOOTH = 0.25
+AUTOSCALE_CHANGE_FRAC = 0.03
 MIN_SPAN_RAW = 0.2              # V
 MIN_SPAN_ENV = 5.0              # %MVC
 
@@ -48,14 +52,22 @@ ALPHA_OVERLAY = 0.18
 BOARD_NUM = 0
 RANGE_NAME = "BIP5VOLTS"        # +/- 5 V
 
+
 # =========================
 # MCC BACKEND
 # =========================
 class MccBackend:
+    """
+    Minimal backend using mcculw.
+    Note: block read here is done via repeated a_in calls paced to fs.
+    If you later want higher performance, switch to UL scanning functions
+    (a_in_scan) with circular buffer.
+    """
     def __init__(self, board_num: int = BOARD_NUM, range_name: str = RANGE_NAME):
         self.board_num = board_num
         self.range_name = range_name
         self._ok = False
+        self._err = None
         try:
             from mcculw import ul
             from mcculw.enums import ULRange
@@ -73,7 +85,7 @@ class MccBackend:
 
     def read_one(self, ch: int) -> float:
         if not self._ok:
-            raise RuntimeError(f"MCC backend unavailable: {getattr(self,'_err',None)}")
+            raise RuntimeError(f"MCC backend unavailable: {self._err}")
         raw = self.ul.a_in(self.board_num, ch, self.ul_range)
         try:
             v = self.ul.to_eng_units(self.board_num, self.ul_range, raw)
@@ -131,6 +143,7 @@ def build_sim_data(fs: int = FS, seed: int = 1) -> SimData:
     rec1 = noise_std * rng.standard_normal(nrec)
     rec2 = noise_std * rng.standard_normal(nrec) + line_amp * np.sin(2 * np.pi * f_line * t_rec)
 
+    # Muscle1 bursts
     burstA1 = 1.5
     nb1 = int(1.0 * fs)
     starts1 = [int(1.0 * fs), int(3.0 * fs)]
@@ -139,6 +152,7 @@ def build_sim_data(fs: int = FS, seed: int = 1) -> SimData:
         idx = np.arange(s, min(s + nb1, nrec))
         rec1[idx] += burstA1 * car1[idx]
 
+    # Muscle2 bursts
     burstA2 = 0.5
     nb2 = int(0.7 * fs)
     starts2 = [int(0.6 * fs), int(1.7 * fs), int(2.8 * fs), int(3.9 * fs)]
@@ -192,6 +206,11 @@ class SimBackend:
 # FAST STREAMING RMS ENVELOPE
 # =========================
 class EnvelopeRMS:
+    """
+    Streaming RMS envelope with:
+    - adaptive mean removal (EMA)
+    - fixed-size ring buffer for squared values
+    """
     def __init__(self, win: int = RMS_WIN, alpha_mean: float = 0.01):
         self.win = max(1, int(win))
         self.alpha_mean = float(alpha_mean)
@@ -233,14 +252,13 @@ class EMGApp:
         self.is_recording = False
         self.mvc_values = np.array([0.0, 0.0], dtype=float)
         self.recordings_raw = []
-
         self.pair_idx = 0  # 0..6 => AI0-1..AI6-7
 
         # Backends
         self.mcc = MccBackend()
         self.sim = SimBackend(build_sim_data(self.fs))
 
-        # Ring buffers
+        # Ring buffers (window only)
         self.raw1 = np.zeros(self.buf_len, dtype=float)
         self.raw2 = np.zeros(self.buf_len, dtype=float)
         self.env1 = np.zeros(self.buf_len, dtype=float)
@@ -248,7 +266,7 @@ class EMGApp:
         self._write_pos = 0
         self._filled = 0
 
-        # Prealloc arrays for plotting (évite concat à chaque frame)
+        # Prealloc plot arrays (no concat)
         self._plot_raw1 = np.zeros(self.buf_len, dtype=float)
         self._plot_raw2 = np.zeros(self.buf_len, dtype=float)
         self._plot_env1 = np.zeros(self.buf_len, dtype=float)
@@ -257,40 +275,42 @@ class EMGApp:
         self.envproc1 = EnvelopeRMS(RMS_WIN)
         self.envproc2 = EnvelopeRMS(RMS_WIN)
 
+        # Full recording storage (only during record)
+        self.full_record = []
+
         # Timing
         self.chunk_pts = CHUNK_PTS
         self.chunk_sec = self.chunk_pts / self.fs
         self.ui_period = 1.0 / UI_FPS
-        self._next_acq_t = None
-        self._next_ui_t = None
+        self._next_acq_t: Optional[float] = None
+        self._next_ui_t: Optional[float] = None
 
-        # Autoscale timing / cached y-lims
+        # Autoscale
         self._autoscale_period = 1.0 / AUTOSCALE_HZ
         self._next_autoscale_t = 0.0
-        self._ylim_cache = {
-            "raw1": None, "raw2": None, "env1": None, "env2": None
-        }
+        self._ylim_cache = {}
 
         # UI
         self._build_ui()
         self._update_status()
 
         # Timer loop
-        self._timer = self.fig.canvas.new_timer(interval=12)  # moins agressif que 5ms
+        self._timer = self.fig.canvas.new_timer(interval=12)  # ~80 Hz tick, UI throttled to UI_FPS
         self._timer.add_callback(self._on_tick)
         self._timer.start()
 
     # ---------------- UI ----------------
     def _build_ui(self):
         self.fig = plt.figure(figsize=(12.5, 7.2))
-        self.fig.canvas.manager.set_window_title("EMG Acquisition (MCC/TEST)")
+        self.fig.canvas.manager.set_window_title("EMG Acquisition (MCC / TEST)")
 
         self.fig.subplots_adjust(left=0.06, right=0.98, top=0.90, bottom=0.12,
                                  wspace=0.18, hspace=0.35)
 
         self.status_text = self.fig.text(0.06, 0.955, "", fontsize=11, ha="left")
-        self.mvc_text = self.fig.text(0.72, 0.955, "", fontsize=11, ha="left")
-        self.rec_text = self.fig.text(0.40, 0.955, "", fontsize=12, ha="left",
+        # MVC text moved to the right
+        self.mvc_text = self.fig.text(0.78, 0.955, "", fontsize=11, ha="left")
+        self.rec_text = self.fig.text(0.46, 0.955, "", fontsize=12, ha="left",
                                       color="red", weight="bold")
         self._rec_blink = False
 
@@ -298,17 +318,21 @@ class EMGApp:
         self.ax_raw2 = self.fig.add_subplot(2, 2, 2)
         self.ax_env1 = self.fig.add_subplot(2, 2, 3)
         self.ax_env2 = self.fig.add_subplot(2, 2, 4)
+
         self._style_axes()
 
+        # Live lines: ONLY single-channel during acquisition
         (self.line_raw1,) = self.ax_raw1.plot([], [], color=COLOR_EMG1, lw=1.0)
         (self.line_raw2,) = self.ax_raw2.plot([], [], color=COLOR_EMG2, lw=1.0)
         (self.line_env1,) = self.ax_env1.plot([], [], color=COLOR_EMG1, lw=1.0)
         (self.line_env2,) = self.ax_env2.plot([], [], color=COLOR_EMG2, lw=1.0)
 
+        # Overlay lines exist but will be shown ONLY in final plots after stop
         (self.line_raw1_ol,) = self.ax_raw1.plot([], [], color=COLOR_EMG2, lw=1.0, alpha=ALPHA_OVERLAY)
         (self.line_raw2_ol,) = self.ax_raw2.plot([], [], color=COLOR_EMG1, lw=1.0, alpha=ALPHA_OVERLAY)
         (self.line_env1_ol,) = self.ax_env1.plot([], [], color=COLOR_EMG2, lw=1.0, alpha=ALPHA_OVERLAY)
         (self.line_env2_ol,) = self.ax_env2.plot([], [], color=COLOR_EMG1, lw=1.0, alpha=ALPHA_OVERLAY)
+        self._set_overlay_visible(False)
 
         # Controls
         ax_pair = self.fig.add_axes([0.06, 0.905, 0.16, 0.06])
@@ -324,7 +348,6 @@ class EMGApp:
         self.rb_pair = RadioButtons(ax_pair, pair_labels, active=self.pair_idx)
         self.rb_pair.on_clicked(self._on_pair_changed)
 
-        # CheckBox TEST
         self.cb_test = CheckButtons(ax_test, ["TEST"], [self.test_mode])
         self.cb_test.on_clicked(self._on_toggle_test_checkbox)
         ax_test.set_title("Mode", fontsize=10, pad=2)
@@ -360,11 +383,14 @@ class EMGApp:
         self.ax_env1.set_ylabel("(%MVC)")
         self.ax_env2.set_ylabel("(%MVC)")
 
-        # limites initiales "propres"
         self.ax_raw1.set_ylim(-0.2, 0.2)
         self.ax_raw2.set_ylim(-0.2, 0.2)
         self.ax_env1.set_ylim(0, 30)
         self.ax_env2.set_ylim(0, 30)
+
+    def _set_overlay_visible(self, visible: bool):
+        for ln in (self.line_raw1_ol, self.line_raw2_ol, self.line_env1_ol, self.line_env2_ol):
+            ln.set_visible(visible)
 
     # -------------- status / callbacks --------------
     def _selected_channels(self) -> Tuple[int, int]:
@@ -390,10 +416,14 @@ class EMGApp:
         self.fig.canvas.draw_idle()
 
     def _on_toggle_test_checkbox(self, _label: str):
+        # ignore toggle while recording: revert checkbox to actual state (no desync)
         if self.is_recording:
-            # remet visuellement la case comme elle était
-            self.cb_test.set_active(0)
+            desired = self.test_mode
+            current = bool(self.cb_test.get_status()[0])
+            if current != desired:
+                self.cb_test.set_active(0)  # flip back
             return
+
         self.test_mode = bool(self.cb_test.get_status()[0])
         if self.test_mode:
             self.sim.reset_record()
@@ -448,11 +478,6 @@ class EMGApp:
         self._filled = min(self.buf_len, self._filled + n)
 
     def _fill_plot_array(self, src: np.ndarray, dst: np.ndarray) -> int:
-        """
-        Remplit dst[0:n] avec la vue chronologique (oldest..newest)
-        Retourne n = nb points valides.
-        Zéro allocation (contrairement à concatenate/copy).
-        """
         n = self._filled
         if n == 0:
             return 0
@@ -473,6 +498,7 @@ class EMGApp:
             self.fig.canvas.draw_idle()
             return
 
+        # reset buffers
         self.raw1[:] = 0
         self.raw2[:] = 0
         self.env1[:] = 0
@@ -481,15 +507,20 @@ class EMGApp:
         self._filled = 0
         self.envproc1 = EnvelopeRMS(RMS_WIN)
         self.envproc2 = EnvelopeRMS(RMS_WIN)
-
-
         self.full_record = []
+
         self.is_recording = True
         self.btn_rec.label.set_text("Stop")
+        self.rec_text.set_text("REC")
+        self._rec_blink = False
+
+        # during recording: overlays hidden
+        self._set_overlay_visible(False)
 
         if self.test_mode:
             self.sim.reset_record()
 
+        # reset axis view to live mode without clearing widgets
         self._reset_live_view()
 
         now = perf_counter()
@@ -503,12 +534,13 @@ class EMGApp:
         self.rec_text.set_text("")
         self._rec_blink = False
 
-        if not hasattr(self, "full_record") or len(self.full_record) == 0:
+        if len(self.full_record) == 0:
             return
 
         rawBuf = np.vstack(self.full_record)
         self.recordings_raw.append(rawBuf)
 
+        # after stop: show final with overlays
         self._plot_final(rawBuf)
         self.status_text.set_text(f"Enregistrement sauvegardé ({rawBuf.shape[0]/self.fs:.2f}s).")
         self.fig.canvas.draw_idle()
@@ -521,7 +553,7 @@ class EMGApp:
 
         now = perf_counter()
 
-        # acquisition catch-up
+        # acquisition catch-up (bounded)
         max_catchup_blocks = 3
         n_catch = 0
         while now >= self._next_acq_t and n_catch < max_catchup_blocks and self.is_recording:
@@ -532,6 +564,7 @@ class EMGApp:
             n_catch += 1
             now = perf_counter()
 
+        # if huge lag, resync (prevents endless drift)
         if now - self._next_acq_t > 0.5:
             self._next_acq_t = now
 
@@ -546,7 +579,7 @@ class EMGApp:
 
     def _blink_rec(self):
         self._rec_blink = not self._rec_blink
-        self.rec_text.set_text("" if self._rec_blink else "REC ●")
+        self.rec_text.set_text("" if self._rec_blink else "REC")
 
     # -------------- live plot update --------------
     def _update_live_lines(self, now: float):
@@ -554,9 +587,9 @@ class EMGApp:
             return
 
         n = self._fill_plot_array(self.raw1, self._plot_raw1)
-        _ = self._fill_plot_array(self.raw2, self._plot_raw2)
-        _ = self._fill_plot_array(self.env1, self._plot_env1)
-        _ = self._fill_plot_array(self.env2, self._plot_env2)
+        self._fill_plot_array(self.raw2, self._plot_raw2)
+        self._fill_plot_array(self.env1, self._plot_env1)
+        self._fill_plot_array(self.env2, self._plot_env2)
 
         raw1 = self._plot_raw1[:n]
         raw2 = self._plot_raw2[:n]
@@ -564,29 +597,18 @@ class EMGApp:
         env2 = self._plot_env2[:n]
 
         mvc1, mvc2 = self.mvc_values
-        if mvc1 > 0:
-            env1n = 100.0 * env1 / mvc1
-        else:
-            env1n = env1
-
-        if mvc2 > 0:
-            env2n = 100.0 * env2 / mvc2
-        else:
-            env2n = env2
+        env1n = (100.0 * env1 / mvc1) if mvc1 > 0 else env1
+        env2n = (100.0 * env2 / mvc2) if mvc2 > 0 else env2
 
         t = np.linspace(-self.window_sec, 0.0, n, endpoint=True)
 
+        # During recording: ONLY the channel itself (no overlay)
         self.line_raw1.set_data(t, raw1)
         self.line_raw2.set_data(t, raw2)
-        self.line_raw1_ol.set_data(t, raw2)
-        self.line_raw2_ol.set_data(t, raw1)
-
         self.line_env1.set_data(t, env1n)
         self.line_env2.set_data(t, env2n)
-        self.line_env1_ol.set_data(t, env2n)
-        self.line_env2_ol.set_data(t, env1n)
 
-        # autoscale moins fréquent + cheap + lissé
+        # Autoscale throttled
         if now >= self._next_autoscale_t:
             self._autoscale_axis(self.ax_raw1, raw1, key="raw1", min_span=MIN_SPAN_RAW)
             self._autoscale_axis(self.ax_raw2, raw2, key="raw2", min_span=MIN_SPAN_RAW)
@@ -596,7 +618,7 @@ class EMGApp:
 
         self._update_status()
 
-    def _autoscale_axis(self, ax, y, key: str, min_span: float, floor: float | None = None):
+    def _autoscale_axis(self, ax, y, key: str, min_span: float, floor: Optional[float] = None):
         y = np.asarray(y)
         if y.size == 0:
             return
@@ -605,7 +627,6 @@ class EMGApp:
         if not np.isfinite(ymin) or not np.isfinite(ymax):
             return
 
-        # si signal quasi plat
         if ymax - ymin < min_span:
             mid = 0.5 * (ymax + ymin)
             ymin = mid - 0.5 * min_span
@@ -623,15 +644,14 @@ class EMGApp:
             self._ylim_cache[key] = target
             return
 
-        # si changement faible -> ne pas bouger
         cur_span = max(1e-12, cur[1] - cur[0])
         tgt_span = max(1e-12, target[1] - target[0])
+
         if abs(tgt_span - cur_span) / cur_span < AUTOSCALE_CHANGE_FRAC and \
            abs(target[0] - cur[0]) / cur_span < AUTOSCALE_CHANGE_FRAC and \
            abs(target[1] - cur[1]) / cur_span < AUTOSCALE_CHANGE_FRAC:
             return
 
-        # lissage
         a = AUTOSCALE_SMOOTH
         new0 = (1 - a) * cur[0] + a * target[0]
         new1 = (1 - a) * cur[1] + a * target[1]
@@ -657,28 +677,24 @@ class EMGApp:
         buf = np.empty(n_total, dtype=float)
         idx = 0
 
-        # Lignes MVC (pas de cla)
         if which == 1:
             ax_raw, ax_env, col = self.ax_raw1, self.ax_env1, COLOR_EMG1
         else:
             ax_raw, ax_env, col = self.ax_raw2, self.ax_env2, COLOR_EMG2
 
-        # sauvegarde titres init
+        # Do not clear whole axis repeatedly; keep existing, add temp lines
         title_raw0 = ax_raw.get_title()
         title_env0 = ax_env.get_title()
 
         ax_raw.set_title(f"EMG{which} MVC (5s)", color=col)
         ax_env.set_title(f"EMG{which} enveloppe MVC", color=col)
 
-        # lignes temporaires MVC
         (mvc_line_raw,) = ax_raw.plot([], [], color=col, lw=1.0)
         (mvc_line_env,) = ax_env.plot([], [], color=col, lw=1.0)
 
         envproc = EnvelopeRMS(RMS_WIN)
 
-        now = perf_counter()
-        next_t = now
-
+        next_t = perf_counter()
         while idx < n_total and plt.fignum_exists(self.fig.number):
             n_this = min(self.chunk_pts, n_total - idx)
             block = self._acquire_block(kind="mvc", n=n_this)
@@ -695,8 +711,6 @@ class EMGApp:
 
             ax_raw.set_xlim(0, MVC_DUR_SEC)
             ax_env.set_xlim(0, MVC_DUR_SEC)
-
-            # autoscale MVC rapide
             self._autoscale_axis(ax_raw, x_all, key=f"mvc_raw_{which}", min_span=MIN_SPAN_RAW)
             self._autoscale_axis(ax_env, env_all, key=f"mvc_env_{which}", min_span=MIN_SPAN_ENV, floor=0.0)
 
@@ -711,6 +725,11 @@ class EMGApp:
         x_all = buf[:idx]
         if x_all.size == 0:
             self.status_text.set_text(f"MVC{which} non mesuré (pas de signal).")
+            mvc_line_raw.remove()
+            mvc_line_env.remove()
+            ax_raw.set_title(title_raw0, color=col)
+            ax_env.set_title(title_env0, color=col)
+            self.fig.canvas.draw_idle()
             return
 
         n_take = min(2000, x_all.size)
@@ -718,7 +737,7 @@ class EMGApp:
         mvc_val = float(np.median(top_vals))
         self.mvc_values[which - 1] = mvc_val
 
-        # nettoyage lignes temporaires MVC
+        # Remove temp lines but keep what's shown (do NOT clear) -> avoids "disappear at end"
         mvc_line_raw.remove()
         mvc_line_env.remove()
         ax_raw.set_title(title_raw0, color=col)
@@ -730,6 +749,9 @@ class EMGApp:
 
     # -------------- final plots + export --------------
     def _plot_final(self, rawBuf: np.ndarray):
+        """
+        Final view after STOP: show overlays (both curves) on raw and filtered.
+        """
         emg1 = rawBuf[:, 0]
         emg2 = rawBuf[:, 1]
         t = np.arange(rawBuf.shape[0]) / self.fs
@@ -743,8 +765,9 @@ class EMGApp:
         env1n = 100.0 * env1 / mvc1 if mvc1 > 0 else env1
         env2n = 100.0 * env2 / mvc2 if mvc2 > 0 else env2
 
-        self.ax_raw1.cla(); self.ax_raw2.cla()
-        self.ax_env1.cla(); self.ax_env2.cla()
+        # Clear axes and draw final with overlays
+        for ax in (self.ax_raw1, self.ax_raw2, self.ax_env1, self.ax_env2):
+            ax.cla()
 
         self.ax_raw1.plot(t, emg1, color=COLOR_EMG1, lw=1.0)
         self.ax_raw1.plot(t, emg2, color=COLOR_EMG2, lw=1.0, alpha=ALPHA_OVERLAY)
@@ -783,6 +806,7 @@ class EMGApp:
             self.status_text.set_text("Aucun enregistrement à exporter.")
             self.fig.canvas.draw_idle()
             return
+
         rawBuf = self.recordings_raw[-1]
         t = np.arange(rawBuf.shape[0]) / self.fs
         emg1 = rawBuf[:, 0]
@@ -805,7 +829,10 @@ class EMGApp:
         self.fig.canvas.draw_idle()
 
     def _reset_live_view(self):
-        # Recrée des axes propres + lignes live (car ax.cla() les détruit)
+        """
+        Reset axes to live view (single-channel lines only),
+        keep the GUI widgets (they are separate axes).
+        """
         for ax in (self.ax_raw1, self.ax_raw2, self.ax_env1, self.ax_env2):
             ax.cla()
 
@@ -820,8 +847,7 @@ class EMGApp:
         (self.line_raw2_ol,) = self.ax_raw2.plot([], [], color=COLOR_EMG1, lw=1.0, alpha=ALPHA_OVERLAY)
         (self.line_env1_ol,) = self.ax_env1.plot([], [], color=COLOR_EMG2, lw=1.0, alpha=ALPHA_OVERLAY)
         (self.line_env2_ol,) = self.ax_env2.plot([], [], color=COLOR_EMG1, lw=1.0, alpha=ALPHA_OVERLAY)
-
-
+        self._set_overlay_visible(False)
 
 
 def main():
