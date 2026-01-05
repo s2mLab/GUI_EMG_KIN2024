@@ -365,6 +365,7 @@ function EMG_GUI_digilent()
             setUIState('idle');
 
             rawBuf = getappdata(f,'rawBuf');
+            warnIfSaturated(f, rawBuf, 4.90, 0.5);
             if isempty(rawBuf)
                 return
             end
@@ -615,7 +616,10 @@ function EMG_GUI_digilent()
 
         setUIState('idle');
         setStatus(sprintf('MVC%d mesuré.', whichMVC), [0.2 0.2 0.2]);
+
+        warnIfSaturated(figHandle, buf, 4.90, 1);
     end
+    
 
     % ============================
     % ACQUISITION UNIFIED
@@ -879,4 +883,44 @@ function sim = buildSimData(Fs)
     rec2 = rec2 - mean(rec2);
 
     sim = struct('Fs',Fs,'tMVC',tMVC,'mvc1',mvc1,'mvc2',mvc2,'tRec',tRec,'rec1',rec1,'rec2',rec2);
+end
+
+
+function warnIfSaturated(figHandle, rawBuf, satV, satPctThreshold)
+% Calcule le % d'échantillons saturés (>|satV|) sur l'ensemble des canaux.
+% Affiche un message dans la GUI si le % dépasse satPctThreshold.
+
+    if nargin < 3 || isempty(satV), satV = 4.90; end
+    if nargin < 4 || isempty(satPctThreshold), satPctThreshold = 1; end
+
+    if isempty(rawBuf) || ~isnumeric(rawBuf)
+        return
+    end
+
+    % Saturation: vrai si au moins un canal dépasse le seuil
+    satMask = any(rawBuf > satV | rawBuf < -satV, 2); % Nx1
+    satPct  = 100 * (sum(satMask) / size(rawBuf,1));
+
+    % Crée/maj un texte d'alerte dans la GUI
+    warnTxt = [];
+    try
+        warnTxt = getappdata(figHandle,'satWarnTxt');
+    catch
+    end
+
+    if isempty(warnTxt) || ~isvalid(warnTxt)
+        warnTxt = uicontrol(figHandle,'Style','text','String','', ...
+            'Units','normalized','Position',[0.05,0.85,0.85,0.04], ...
+            'FontSize',12,'FontWeight','bold','ForegroundColor',[0.85 0 0], ...
+            'BackgroundColor',get(figHandle,'Color'), ...
+            'HorizontalAlignment','left');
+        setappdata(figHandle,'satWarnTxt',warnTxt);
+    end
+
+    if satPct > satPctThreshold
+        set(warnTxt,'String',sprintf(['%.1f%% de votre essai présente des valeurs saturées. ' ...
+            'Réduire l''amplification dans le logiciel LINK15'], satPct));
+    else
+        set(warnTxt,'String',''); % pas d'alerte
+    end
 end

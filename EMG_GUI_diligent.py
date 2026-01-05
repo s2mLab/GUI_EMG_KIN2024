@@ -674,74 +674,95 @@ class EMGApp:
         self.fig.canvas.draw_idle()
 
         n_total = int(MVC_DUR_SEC * self.fs)
-        buf = np.empty(n_total, dtype=float)
-        idx = 0
 
         if which == 1:
             ax_raw, ax_env, col = self.ax_raw1, self.ax_env1, COLOR_EMG1
         else:
             ax_raw, ax_env, col = self.ax_raw2, self.ax_env2, COLOR_EMG2
 
-        # Do not clear whole axis repeatedly; keep existing, add temp lines
-        title_raw0 = ax_raw.get_title()
-        title_env0 = ax_env.get_title()
-
+        # --- axes reset ---
+        ax_raw.cla()
+        ax_env.cla()
+        ax_raw.grid(True, alpha=0.25)
+        ax_env.grid(True, alpha=0.25)
+        ax_raw.set_xlabel("Temps (s)")
+        ax_env.set_xlabel("Temps (s)")
+        ax_raw.set_ylabel("Activité (V)")
+        ax_env.set_ylabel("(%MVC)")
         ax_raw.set_title(f"EMG{which} MVC (5s)", color=col)
         ax_env.set_title(f"EMG{which} enveloppe MVC", color=col)
+        ax_raw.set_xlim(0, MVC_DUR_SEC)
+        ax_env.set_xlim(0, MVC_DUR_SEC)
 
-        (mvc_line_raw,) = ax_raw.plot([], [], color=col, lw=1.0)
-        (mvc_line_env,) = ax_env.plot([], [], color=col, lw=1.0)
+        # ==========================
+        # PREALLOCATION (KEY CHANGE)
+        # ==========================
+        t = np.arange(n_total) / self.fs
+
+        # Use NaNs for "not yet acquired" points (matplotlib won't draw them)
+        y_raw = np.full(n_total, np.nan, dtype=float)
+        y_env = np.full(n_total, np.nan, dtype=float)
+
+        # Create lines once, set x once, then only update y arrays
+        (line_raw,) = ax_raw.plot(t, y_raw, color=col, lw=1.0)
+        (line_env,) = ax_env.plot(t, y_env, color=col, lw=1.0)
 
         envproc = EnvelopeRMS(RMS_WIN)
 
+        idx = 0
         next_t = perf_counter()
+
         while idx < n_total and plt.fignum_exists(self.fig.number):
             n_this = min(self.chunk_pts, n_total - idx)
             block = self._acquire_block(kind="mvc", n=n_this)
             x = block[:, which - 1]
-            buf[idx:idx + n_this] = x
+
+            # Fill the preallocated arrays
+            y_raw[idx:idx + n_this] = x
+
+            # Compute envelope only on the acquired portion
+            x_all = y_raw[:idx + n_this]
+            env_all = envproc.process(np.nan_to_num(x_all, nan=0.0))
+
+            # Put envelope back into the preallocated y_env (rest stays NaN)
+            y_env[:idx + n_this] = env_all
+
             idx += n_this
 
-            x_all = buf[:idx]
-            env_all = envproc.process(x_all)
+            # Update ONLY ydata (x is fixed)
+            line_raw.set_ydata(y_raw)
+            line_env.set_ydata(y_env)
 
-            t = np.arange(idx) / self.fs
-            mvc_line_raw.set_data(t, x_all)
-            mvc_line_env.set_data(t, env_all)
-
-            ax_raw.set_xlim(0, MVC_DUR_SEC)
-            ax_env.set_xlim(0, MVC_DUR_SEC)
-            self._autoscale_axis(ax_raw, x_all, key=f"mvc_raw_{which}", min_span=MIN_SPAN_RAW)
-            self._autoscale_axis(ax_env, env_all, key=f"mvc_env_{which}", min_span=MIN_SPAN_ENV, floor=0.0)
+            # autoscale based only on acquired samples
+            acquired_raw = y_raw[:idx]
+            acquired_env = y_env[:idx]
+            self._autoscale_axis(ax_raw, acquired_raw[np.isfinite(acquired_raw)],
+                                 key=f"mvc_raw_{which}", min_span=MIN_SPAN_RAW)
+            self._autoscale_axis(ax_env, acquired_env[np.isfinite(acquired_env)],
+                                 key=f"mvc_env_{which}", min_span=MIN_SPAN_ENV, floor=0.0)
 
             self.fig.canvas.draw_idle()
             plt.pause(0.001)
 
+            # real-time pacing
             next_t += n_this / self.fs
             delay = next_t - perf_counter()
             if delay > 0:
                 time.sleep(delay)
 
-        x_all = buf[:idx]
-        if x_all.size == 0:
+        # Final buffer (only acquired)
+        x_final = y_raw[:idx]
+        x_final = x_final[np.isfinite(x_final)]
+        if x_final.size == 0:
             self.status_text.set_text(f"MVC{which} non mesuré (pas de signal).")
-            mvc_line_raw.remove()
-            mvc_line_env.remove()
-            ax_raw.set_title(title_raw0, color=col)
-            ax_env.set_title(title_env0, color=col)
             self.fig.canvas.draw_idle()
             return
 
-        n_take = min(2000, x_all.size)
-        top_vals = np.partition(np.abs(x_all), -n_take)[-n_take:]
+        # Compute MVC value
+        n_take = min(2000, x_final.size)
+        top_vals = np.partition(np.abs(x_final), -n_take)[-n_take:]
         mvc_val = float(np.median(top_vals))
         self.mvc_values[which - 1] = mvc_val
-
-        # Remove temp lines but keep what's shown (do NOT clear) -> avoids "disappear at end"
-        mvc_line_raw.remove()
-        mvc_line_env.remove()
-        ax_raw.set_title(title_raw0, color=col)
-        ax_env.set_title(title_env0, color=col)
 
         self.status_text.set_text(f"MVC{which} mesuré.")
         self._update_status()
@@ -849,6 +870,7 @@ class EMGApp:
         (self.line_env2_ol,) = self.ax_env2.plot([], [], color=COLOR_EMG1, lw=1.0, alpha=ALPHA_OVERLAY)
         self._set_overlay_visible(False)
 
+    
 
 def main():
     _ = EMGApp()
