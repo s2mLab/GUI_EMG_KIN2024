@@ -181,6 +181,28 @@ Le CSV contient les colonnes suivantes :
 4. En laboratoire, répéter avec un mouvement simple et deux muscles en
    documentant le placement des électrodes et la consigne MVC.
 
+## Feuille de route proposée
+
+Ces améliorations visent d'abord la compréhension par des étudiants qui
+découvrent l'EMG, puis la robustesse d'une utilisation en laboratoire.
+
+| Priorité | Axe | Bénéfice attendu |
+| --- | --- | --- |
+| 1 | Parcours guidé `Préparer -> MVC -> Enregistrer -> Interpréter -> Exporter` | Réduit les erreurs de manipulation lors d'une première séance |
+| 2 | Axe affiché en volts avant la MVC, puis en `%MVC` après calibration | Évite de présenter comme normalisée une enveloppe qui ne l'est pas encore |
+| 3 | Rejet de 60 Hz et passe-bande EMG dans l'application Python | Rapproche la démonstration des pratiques de traitement expliquées en cours |
+| 4 | Acquisition MCC scannée avec tampon circulaire | Améliore la régularité de l'échantillonnage et la fluidité de l'affichage |
+| 5 | Alertes de saturation, bruit élevé et MVC insuffisante | Donne un retour immédiat sur la qualité du signal |
+| 6 | Scénarios `TEST` plus longs et annotés | Permet d'enseigner bruit, coactivation et artefacts sans matériel |
+| 7 | Interface Qt/PyQtGraph avec commandes agrandies | Facilite l'usage en salle de laboratoire et le temps réel |
+| 8 | Métadonnées de séance dans les exports | Rend les fichiers exploitables et traçables lors des travaux pratiques |
+| 9 | Sélection d'une période et statistiques simples de `%MVC` | Relie immédiatement le tracé à une question d'analyse |
+| 10 | Tests automatisés et diagnostic de connexion MCC | Sécurise les évolutions et réduit les problèmes de démarrage |
+
+Un premier lot d'implémentation raisonnable regrouperait les priorités `1`,
+`2`, `3` et `4` : elles améliorent à la fois la pédagogie, la validité de
+l'interprétation et les performances en acquisition réelle.
+
 ## Développement
 
 Pour vérifier rapidement la syntaxe du programme principal :
