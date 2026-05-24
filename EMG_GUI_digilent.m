@@ -6,8 +6,8 @@ function EMG_GUI_digilent()
 % - Recording shows RAW (top) + FILTERED+NORMALISED (bottom) LIVE, like MVC
 % - MVC streaming uses separate sim index (sim_idx_mvc) from recording (sim_idx_record)
 
-    f = figure('Name','EMG Acquisition','NumberTitle','off', ...
-        'Position',[100,100,900,700],'Units','normalized', ...
+    f = figure('Name','EMG Acquisition pedagogique','NumberTitle','off', ...
+        'Position',[100,100,1200,820],'Units','normalized', ...
         'CloseRequestFcn', @onClose);
 
 
@@ -22,12 +22,9 @@ function EMG_GUI_digilent()
     Fs = 2000;
     boardNum = 0;
 
-    % --- MCC .NET init (remplace cb* wrappers) ---
-    NET.addAssembly('MccDaq');
-    mcc_board = MccDaq.MccBoard(boardNum);
-    mcc_range = MccDaq.Range.Bip5Volts;  % +/- 5V
-    setappdata(f,'mcc_board',mcc_board);
-    setappdata(f,'mcc_range',mcc_range);
+    % MCC .NET is initialised only when hardware mode is requested.
+    setappdata(f,'mcc_board',[]);
+    setappdata(f,'mcc_range',[]);
 
 
     %% Store constants/state
@@ -44,7 +41,8 @@ function EMG_GUI_digilent()
     setappdata(f,'recordings_raw',{});
     setappdata(f,'rawBuf',[]);
     setappdata(f,'sampleIdx',0);
-    setappdata(f,'test_mode',false);
+    setappdata(f,'test_mode',true);
+    setappdata(f,'guided_mode',true);
     setappdata(f,'isRecording',false);
 
     setappdata(f,'sim_data',[]);
@@ -54,45 +52,52 @@ function EMG_GUI_digilent()
 
     %% Build UI & connect
     buildUI();
+    setappdata(f,'sim_data',buildSimData(Fs));
     connectDAQ();
 
     % ============================
     % UI BUILD
     % ============================
     function buildUI()
+        guideTxt = uicontrol(f,'Style','text','String','', ...
+            'Units','normalized','Position',[0.05,0.955,0.90,0.035], ...
+            'FontSize',13,'FontWeight','bold','ForegroundColor',[0.08 0.20 0.45], ...
+            'HorizontalAlignment','left');
+        setappdata(f,'guideTxt',guideTxt);
+
         % Status + MVC + REC
-        statusTxt = uicontrol(f,'Style','text','String','Prêt. Activez 🧪 Test si pas de carte.', ...
-            'Units','normalized','Position',[0.05,0.94,0.60,0.04], ...
+        statusTxt = uicontrol(f,'Style','text','String','Pret.', ...
+            'Units','normalized','Position',[0.05,0.915,0.58,0.035], ...
             'FontSize',12,'HorizontalAlignment','left');
         setappdata(f,'statusTxt',statusTxt);
 
         recTxt = uicontrol(f,'Style','text','String','', ...
-            'Units','normalized','Position',[0.40,0.94,0.15,0.04], ...
+            'Units','normalized','Position',[0.46,0.875,0.10,0.035], ...
             'FontSize',12,'FontWeight','bold','HorizontalAlignment','left', ...
             'ForegroundColor',[1 0 0]);
         setappdata(f,'recTxt',recTxt);
 
         mvcTxt = uicontrol(f,'Style','text','String','', ...
-            'Units','normalized','Position',[0.58,0.94,0.4,0.04], ...
+            'Units','normalized','Position',[0.67,0.915,0.30,0.035], ...
             'FontSize',12,'HorizontalAlignment','left');
         setappdata(f,'mvcTxt',mvcTxt);
 
         % Popup pair
         pairList = arrayfun(@(k) sprintf('AI%d-%d',k,k+1), 0:6, 'UniformOutput', false);
         uicontrol(f,'Style','text','String','Paire EMG:', ...
-            'Units','normalized','Position',[0.05,0.905,0.08,0.035],'HorizontalAlignment','left');
+            'Units','normalized','Position',[0.05,0.875,0.08,0.03],'HorizontalAlignment','left');
 
         popupPair = uicontrol(f,'Style','popupmenu','String',pairList, ...
-            'Units','normalized','Position',[0.13,0.905,0.10,0.035], ...
+            'Units','normalized','Position',[0.13,0.875,0.10,0.035], ...
             'FontSize',11,'Value',1, ...
             'Callback',@(~,~) connectDAQ());
         setappdata(f,'popupPair',popupPair);
 
         % Axes
-        ax_raw1  = axes(f,'Units','normalized','Position',[0.07,0.53,0.40,0.30]); hold(ax_raw1,'on');
-        ax_raw2  = axes(f,'Units','normalized','Position',[0.53,0.53,0.40,0.30]); hold(ax_raw2,'on');
-        ax_filt1 = axes(f,'Units','normalized','Position',[0.07,0.10,0.40,0.30]); hold(ax_filt1,'on');
-        ax_filt2 = axes(f,'Units','normalized','Position',[0.53,0.10,0.40,0.30]); hold(ax_filt2,'on');
+        ax_raw1  = axes(f,'Units','normalized','Position',[0.07,0.50,0.40,0.29]); hold(ax_raw1,'on');
+        ax_raw2  = axes(f,'Units','normalized','Position',[0.53,0.50,0.40,0.29]); hold(ax_raw2,'on');
+        ax_filt1 = axes(f,'Units','normalized','Position',[0.07,0.11,0.40,0.29]); hold(ax_filt1,'on');
+        ax_filt2 = axes(f,'Units','normalized','Position',[0.53,0.11,0.40,0.29]); hold(ax_filt2,'on');
 
         setappdata(f,'ax_raw1',ax_raw1);
         setappdata(f,'ax_raw2',ax_raw2);
@@ -100,28 +105,34 @@ function EMG_GUI_digilent()
         setappdata(f,'ax_filt2',ax_filt2);
 
         % Buttons (top row)
-        btnTest = uicontrol(f,'Style','togglebutton','String','🧪 Test', ...
-            'Units','normalized','Position',[0.46,0.905,0.07,0.035],'FontSize',11, ...
+        btnTest = uicontrol(f,'Style','togglebutton','String','TEST', ...
+            'Units','normalized','Position',[0.25,0.87,0.07,0.045],'FontSize',12, ...
+            'Value',1, ...
             'Callback',@(src,~) toggleTestMode(src));
         setappdata(f,'btnTest',btnTest);
 
-        btnStart = uicontrol(f,'Style','togglebutton','String','⏺ Enregistrer', ...
-            'Units','normalized','Position',[0.54,0.905,0.20,0.035],'FontSize',12, ...
+        btnGuide = uicontrol(f,'Style','togglebutton','String','GUIDE', ...
+            'Units','normalized','Position',[0.33,0.87,0.08,0.045],'FontSize',12, ...
+            'Value',1,'Callback',@(src,~) toggleGuidedMode(src));
+        setappdata(f,'btnGuide',btnGuide);
+
+        btnStart = uicontrol(f,'Style','togglebutton','String','Enregistrer', ...
+            'Units','normalized','Position',[0.61,0.87,0.14,0.045],'FontSize',13, ...
             'Callback',@(src,~) startStopDAQ(src));
         setappdata(f,'btnStart',btnStart);
 
         uicontrol(f,'Style','pushbutton','String','MVC 1', ...
-            'Units','normalized','Position',[0.76,0.905,0.08,0.035],'FontSize',12, ...
+            'Units','normalized','Position',[0.43,0.87,0.08,0.045],'FontSize',13, ...
             'Callback',@(~,~) measureMVC(1));
 
         uicontrol(f,'Style','pushbutton','String','MVC 2', ...
-            'Units','normalized','Position',[0.85,0.905,0.08,0.035],'FontSize',12, ...
+            'Units','normalized','Position',[0.52,0.87,0.08,0.045],'FontSize',13, ...
             'Callback',@(~,~) measureMVC(2));
 
         % Bottom buttons
         uicontrol(f,'Style','pushbutton','String','Exporter les graphiques', ...
             'Units','normalized','Position',[0.60,0.02,0.18,0.035],'FontSize',12, ...
-            'Callback',@(~,~) exportGraphs(ax_raw1,ax_raw2,ax_filt1,ax_filt2));
+            'Callback',@(~,~) exportGraphs(f,ax_raw1,ax_raw2,ax_filt1,ax_filt2));
 
         uicontrol(f,'Style','pushbutton','String','Exporter CSV', ...
             'Units','normalized','Position',[0.80,0.02,0.18,0.035],'FontSize',12, ...
@@ -129,6 +140,7 @@ function EMG_GUI_digilent()
 
         % Initial axes labels/titles + create live lines
         resetAllAxes('idle');
+        updateGuide();
     end
 
     % ============================
@@ -155,7 +167,7 @@ function EMG_GUI_digilent()
                 set(popupPair,'Enable','on');
                 if ~isempty(btnStart) && isvalid(btnStart)
                     btnStart.Value = 0;
-                    btnStart.String = '⏺ Enregistrer';
+                    btnStart.String = 'Enregistrer';
                 end
                 if ~isempty(recTxt) && isvalid(recTxt)
                     set(recTxt,'String','');
@@ -165,10 +177,10 @@ function EMG_GUI_digilent()
             case 'recording'
                 set(popupPair,'Enable','off');
                 if ~isempty(btnStart) && isvalid(btnStart)
-                    btnStart.String = '⏹ Stop';
+                    btnStart.String = 'Stop';
                 end
                 if ~isempty(recTxt) && isvalid(recTxt)
-                    set(recTxt,'String','REC ●');
+                    set(recTxt,'String','REC');
                 end
                 setappdata(f,'recBlinkOn',true);
 
@@ -190,8 +202,8 @@ function EMG_GUI_digilent()
 
         applyAxisStyle(ax_raw1,  'EMG1 brut', color_emg1, 'Activité (V)');
         applyAxisStyle(ax_raw2,  'EMG2 brut', color_emg2, 'Activité (V)');
-        applyAxisStyle(ax_filt1, 'EMG1 filtré (normalisé)', color_emg1, '(%MVC)');
-        applyAxisStyle(ax_filt2, 'EMG2 filtré (normalisé)', color_emg2, '(%MVC)');
+        styleEnvelopeAxis(ax_filt1, 1, color_emg1);
+        styleEnvelopeAxis(ax_filt2, 2, color_emg2);
 
         % Live lines (raw + filt)
         hLine_raw1  = plot(ax_raw1, nan, nan, '-', 'Color', color_emg1);
@@ -219,6 +231,34 @@ function EMG_GUI_digilent()
         ylabel(ax,yLabelStr);
     end
 
+    function styleEnvelopeAxis(ax, which, col)
+        mvc = getappdata(f,'mvc_values');
+        if ~isempty(mvc) && numel(mvc)>=which && mvc(which)>0
+            applyAxisStyle(ax, sprintf('EMG%d enveloppe normalisee',which), col, 'Activation (%MVC)');
+        else
+            applyAxisStyle(ax, sprintf('EMG%d enveloppe RMS',which), col, 'Enveloppe RMS (V)');
+        end
+    end
+
+    function updateGuide()
+        guideTxt = getappdata(f,'guideTxt');
+        if isempty(guideTxt) || ~isvalid(guideTxt), return, end
+        mvc = getappdata(f,'mvc_values');
+        recs = getappdata(f,'recordings_raw');
+        if ~getappdata(f,'guided_mode')
+            msg = 'Mode libre : calibrez les MVC avant d''interpreter une valeur en %MVC.';
+        elseif isempty(mvc) || mvc(1)<=0
+            msg = 'Etape 1/4 - Mesurez MVC 1 pendant une contraction maximale de 5 s.';
+        elseif mvc(2)<=0
+            msg = 'Etape 2/4 - Mesurez MVC 2 pendant une contraction maximale de 5 s.';
+        elseif isempty(recs)
+            msg = 'Etape 3/4 - Les deux MVC sont pretes : lancez Enregistrer.';
+        else
+            msg = 'Etape 4/4 - Interpretez les courbes puis exportez les resultats.';
+        end
+        set(guideTxt,'String',msg);
+    end
+
     function blinkREC()
         recTxt = getappdata(f,'recTxt');
         if isempty(recTxt) || ~isvalid(recTxt), return, end
@@ -226,7 +266,7 @@ function EMG_GUI_digilent()
         if blink
             set(recTxt,'String','');
         else
-            set(recTxt,'String','REC ●');
+            set(recTxt,'String','REC');
         end
         setappdata(f,'recBlinkOn',~blink);
     end
@@ -241,10 +281,16 @@ function EMG_GUI_digilent()
 
         if getappdata(f,'test_mode')
             setStatus(sprintf('Mode TEST (simulé) | paire AI%d-%d',ch1,ch2), [0.2 0.2 0.2]);
+            updateGuide();
             return
         end
 
         try
+            if isempty(getappdata(f,'mcc_board'))
+                NET.addAssembly('MccDaq');
+                setappdata(f,'mcc_board',MccDaq.MccBoard(getappdata(f,'boardNum')));
+                setappdata(f,'mcc_range',MccDaq.Range.Bip5Volts);
+            end
             mcc_board = getappdata(f,'mcc_board');
             mcc_range = getappdata(f,'mcc_range');
         
@@ -261,7 +307,7 @@ function EMG_GUI_digilent()
         
             setStatus(sprintf('MCC détectée (.NET) | paire AI%d-%d',ch1,ch2), 'green');
         catch ME
-            setStatus('Erreur MCC (.NET). Activez 🧪 Test si besoin.', 'red');
+            setStatus('Erreur MCC (.NET). Activez TEST si besoin.', 'red');
             disp(getReport(ME,'extended'));
         end
 
@@ -291,6 +337,12 @@ function EMG_GUI_digilent()
             setStatus('Mode TEST désactivé.',[0.2 0.2 0.2]);
         end
         connectDAQ();
+        updateGuide();
+    end
+
+    function toggleGuidedMode(src)
+        setappdata(f,'guided_mode',logical(src.Value));
+        updateGuide();
     end
 
     function [ch1, ch2] = getSelectedPair()
@@ -331,6 +383,13 @@ function EMG_GUI_digilent()
 
         if src.Value
             % START
+            mvc = getappdata(f,'mvc_values');
+            if getappdata(f,'guided_mode') && (isempty(mvc) || any(mvc<=0))
+                src.Value = 0;
+                setStatus('Mesurez MVC 1 et MVC 2 avant d''enregistrer en mode GUIDE.', 'red');
+                updateGuide();
+                return
+            end
             setappdata(f,'rawBuf',[]);
             setappdata(f,'sampleIdx',0);
             setappdata(f,'isRecording',true);
@@ -478,14 +537,14 @@ function EMG_GUI_digilent()
         plot(ax_filt1, tsec_filt, filt1, '-', 'Color', color_emg1);
         h = plot(ax_filt1, tsec_filt, filt2, '-', 'Color', color_emg2);
         setLineAlphaOrLighten(h, color_emg2, alpha_overlay);
-        applyAxisStyle(ax_filt1,'EMG1 filtré (normalisé)', color_emg1, '(%MVC)');
+        styleEnvelopeAxis(ax_filt1, 1, color_emg1);
         set(ax_filt1,'XLim',[tsec_filt(1) tsec_filt(end)]);
 
         cla(ax_filt2); hold(ax_filt2,'on');
         plot(ax_filt2, tsec_filt, filt2, '-', 'Color', color_emg2);
         h = plot(ax_filt2, tsec_filt, filt1, '-', 'Color', color_emg1);
         setLineAlphaOrLighten(h, color_emg1, alpha_overlay);
-        applyAxisStyle(ax_filt2,'EMG2 filtré (normalisé)', color_emg2, '(%MVC)');
+        styleEnvelopeAxis(ax_filt2, 2, color_emg2);
         set(ax_filt2,'XLim',[tsec_filt(1) tsec_filt(end)]);
 
         rec_count = getappdata(f,'rec_count') + 1;
@@ -504,6 +563,7 @@ function EMG_GUI_digilent()
         assignin('base','EMG2_filtered',filt2);
 
         setStatus(sprintf('Enregistrement #%02d sauvegardé.', rec_count), [0.2 0.2 0.2]);
+        updateGuide();
     end
 
     % ============================
@@ -553,7 +613,7 @@ function EMG_GUI_digilent()
         hFilt = plot(targetFilt,nan,nan,'-','Color',col);
 
         applyAxisStyle(targetRaw,  sprintf('EMG%d MVC (%ds)',whichMVC,durSec), col, 'Activité (V)');
-        applyAxisStyle(targetFilt, sprintf('EMG%d enveloppe MVC',whichMVC),      col, '(%MVC)');
+        applyAxisStyle(targetFilt, sprintf('EMG%d enveloppe MVC',whichMVC),      col, 'Enveloppe RMS (V)');
         set(targetRaw,'XLim',[0 durSec]);
         set(targetFilt,'XLim',[0 durSec]);
 
@@ -616,6 +676,7 @@ function EMG_GUI_digilent()
 
         setUIState('idle');
         setStatus(sprintf('MVC%d mesuré.', whichMVC), [0.2 0.2 0.2]);
+        updateGuide();
 
         warnIfSaturated(figHandle, buf, 4.90, 1);
     end
@@ -774,16 +835,27 @@ end
 % =========================================================================
 % EXPORTS
 % =========================================================================
-function exportGraphs(ax_raw1,ax_raw2,ax_filt1,ax_filt2)
+function exportGraphs(figHandle, ax_raw1,ax_raw2,ax_filt1,ax_filt2)
     fig = figure('Visible','off','Position',[100,100,1200,800]);
     subplot(2,2,1); copyobj(allchild(ax_raw1), gca);
     title('EMG1 brut'); xlabel('Temps (s)'); ylabel('Activité (V)');
     subplot(2,2,2); copyobj(allchild(ax_raw2), gca);
     title('EMG2 brut'); xlabel('Temps (s)'); ylabel('Activité (V)');
+    mvc = getappdata(figHandle,'mvc_values');
     subplot(2,2,3); copyobj(allchild(ax_filt1), gca);
-    title('EMG1 filtré (normalisé)'); xlabel('Temps (s)'); ylabel('(%MVC)');
+    if ~isempty(mvc) && mvc(1)>0
+        title('EMG1 enveloppe normalisee'); ylabel('Activation (%MVC)');
+    else
+        title('EMG1 enveloppe RMS'); ylabel('Enveloppe RMS (V)');
+    end
+    xlabel('Temps (s)');
     subplot(2,2,4); copyobj(allchild(ax_filt2), gca);
-    title('EMG2 filtré (normalisé)'); xlabel('Temps (s)'); ylabel('(%MVC)');
+    if ~isempty(mvc) && mvc(2)>0
+        title('EMG2 enveloppe normalisee'); ylabel('Activation (%MVC)');
+    else
+        title('EMG2 enveloppe RMS'); ylabel('Enveloppe RMS (V)');
+    end
+    xlabel('Temps (s)');
 
     [file,path] = uiputfile('*.png','Exporter les graphiques sous...');
     if ~isequal(file,0)
@@ -812,9 +884,13 @@ function exportCSV(figHandle)
         if numel(mvc)>=2 && mvc(2)>0, filt2 = 100*(filt2/mvc(2)); end
     end
 
+    env1Name = 'emg1_env_V';
+    env2Name = 'emg2_env_V';
+    if ~isempty(mvc) && numel(mvc)>=1 && mvc(1)>0, env1Name = 'emg1_env_pctMVC'; end
+    if ~isempty(mvc) && numel(mvc)>=2 && mvc(2)>0, env2Name = 'emg2_env_pctMVC'; end
     t = (0:size(rawBuf,1)-1)'/Fs;
     T = table(t, emg1_raw, emg2_raw, filt1, filt2, ...
-        'VariableNames', {'time_s','emg1_raw_V','emg2_raw_V','emg1_filt_pctMVC','emg2_filt_pctMVC'});
+        'VariableNames', {'time_s','emg1_raw_V','emg2_raw_V',env1Name,env2Name});
 
     [file,path] = uiputfile('*.csv','Exporter CSV sous...');
     if isequal(file,0), return, end

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-EMG GUI (Python) — MCC USB-1206FS-PLUS (mcculw + InstaCal) OR TEST MODE
+EMG GUI (Python) - MCC USB-1208FS-PLUS (mcculw + InstaCal) OR TEST MODE
 
 Corrections demandées:
 - Pendant l'acquisition ("Enregistrer"), chaque subplot n'affiche QUE son EMG (pas d'overlay).
@@ -249,6 +249,7 @@ class EMGApp:
 
         # State
         self.test_mode = True
+        self.guided_mode = True
         self.is_recording = False
         self.mvc_values = np.array([0.0, 0.0], dtype=float)
         self.recordings_raw = []
@@ -301,16 +302,18 @@ class EMGApp:
 
     # ---------------- UI ----------------
     def _build_ui(self):
-        self.fig = plt.figure(figsize=(12.5, 7.2))
+        self.fig = plt.figure(figsize=(14.0, 8.0))
         self.fig.canvas.manager.set_window_title("EMG Acquisition (MCC / TEST)")
 
-        self.fig.subplots_adjust(left=0.06, right=0.98, top=0.90, bottom=0.12,
+        self.fig.subplots_adjust(left=0.06, right=0.98, top=0.72, bottom=0.12,
                                  wspace=0.18, hspace=0.35)
 
-        self.status_text = self.fig.text(0.06, 0.955, "", fontsize=11, ha="left")
-        # MVC text moved to the right
-        self.mvc_text = self.fig.text(0.78, 0.955, "", fontsize=11, ha="left")
-        self.rec_text = self.fig.text(0.46, 0.955, "", fontsize=12, ha="left",
+        self.guide_text = self.fig.text(0.06, 0.972, "", fontsize=12, ha="left",
+                                        weight="bold", color=(0.08, 0.20, 0.45))
+        self.mode_text = self.fig.text(0.06, 0.937, "", fontsize=11, ha="left")
+        self.status_text = self.fig.text(0.06, 0.902, "Pret.", fontsize=11, ha="left")
+        self.mvc_text = self.fig.text(0.72, 0.937, "", fontsize=11, ha="left")
+        self.rec_text = self.fig.text(0.48, 0.937, "", fontsize=12, ha="left",
                                       color="red", weight="bold")
         self._rec_blink = False
 
@@ -335,11 +338,11 @@ class EMGApp:
         self._set_overlay_visible(False)
 
         # Controls
-        ax_pair = self.fig.add_axes([0.06, 0.905, 0.16, 0.06])
-        ax_test = self.fig.add_axes([0.235, 0.905, 0.10, 0.06])
-        ax_rec = self.fig.add_axes([0.345, 0.905, 0.12, 0.06])
-        ax_mvc1 = self.fig.add_axes([0.48, 0.905, 0.08, 0.06])
-        ax_mvc2 = self.fig.add_axes([0.57, 0.905, 0.08, 0.06])
+        ax_pair = self.fig.add_axes([0.06, 0.745, 0.14, 0.13])
+        ax_test = self.fig.add_axes([0.22, 0.77, 0.12, 0.095])
+        ax_mvc1 = self.fig.add_axes([0.38, 0.785, 0.10, 0.06])
+        ax_mvc2 = self.fig.add_axes([0.49, 0.785, 0.10, 0.06])
+        ax_rec = self.fig.add_axes([0.61, 0.785, 0.14, 0.06])
 
         ax_exp_png = self.fig.add_axes([0.74, 0.02, 0.11, 0.07])
         ax_exp_csv = self.fig.add_axes([0.86, 0.02, 0.11, 0.07])
@@ -348,8 +351,8 @@ class EMGApp:
         self.rb_pair = RadioButtons(ax_pair, pair_labels, active=self.pair_idx)
         self.rb_pair.on_clicked(self._on_pair_changed)
 
-        self.cb_test = CheckButtons(ax_test, ["TEST"], [self.test_mode])
-        self.cb_test.on_clicked(self._on_toggle_test_checkbox)
+        self.cb_test = CheckButtons(ax_test, ["TEST", "GUIDE"], [self.test_mode, self.guided_mode])
+        self.cb_test.on_clicked(self._on_toggle_mode_checkbox)
         ax_test.set_title("Mode", fontsize=10, pad=2)
 
         self.btn_rec = Button(ax_rec, "Enregistrer")
@@ -375,13 +378,9 @@ class EMGApp:
 
         self.ax_raw1.set_title("EMG1 brut", color=COLOR_EMG1)
         self.ax_raw2.set_title("EMG2 brut", color=COLOR_EMG2)
-        self.ax_env1.set_title("EMG1 filtré (normalisé)", color=COLOR_EMG1)
-        self.ax_env2.set_title("EMG2 filtré (normalisé)", color=COLOR_EMG2)
-
         self.ax_raw1.set_ylabel("Activité (V)")
         self.ax_raw2.set_ylabel("Activité (V)")
-        self.ax_env1.set_ylabel("(%MVC)")
-        self.ax_env2.set_ylabel("(%MVC)")
+        self._update_envelope_labels()
 
         self.ax_raw1.set_ylim(-0.2, 0.2)
         self.ax_raw2.set_ylim(-0.2, 0.2)
@@ -396,16 +395,43 @@ class EMGApp:
     def _selected_channels(self) -> Tuple[int, int]:
         return self.pair_idx, self.pair_idx + 1
 
+    def _has_mvc(self, which: int) -> bool:
+        return bool(self.mvc_values[which - 1] > 0)
+
+    def _update_envelope_labels(self):
+        for which, ax, col in ((1, self.ax_env1, COLOR_EMG1), (2, self.ax_env2, COLOR_EMG2)):
+            if self._has_mvc(which):
+                ax.set_title(f"EMG{which} enveloppe normalisee", color=col)
+                ax.set_ylabel("Activation (%MVC)")
+            else:
+                ax.set_title(f"EMG{which} enveloppe RMS", color=col)
+                ax.set_ylabel("Enveloppe RMS (V)")
+
+    def _update_guidance(self):
+        if not self.guided_mode:
+            instruction = "Mode libre : calibrez les MVC avant d'interpreter une valeur en %MVC."
+        elif not self._has_mvc(1):
+            instruction = "Etape 1/4 - Mesurez MVC 1 pendant une contraction maximale de 5 s."
+        elif not self._has_mvc(2):
+            instruction = "Etape 2/4 - Mesurez MVC 2 pendant une contraction maximale de 5 s."
+        elif not self.recordings_raw:
+            instruction = "Etape 3/4 - Les deux MVC sont pretes : lancez Enregistrer."
+        else:
+            instruction = "Etape 4/4 - Interpretez les courbes puis exportez PNG ou CSV."
+        self.guide_text.set_text(instruction)
+
     def _update_status(self):
         ch1, ch2 = self._selected_channels()
         if self.test_mode:
-            self.status_text.set_text(f"Mode TEST (simulé) | paire AI{ch1}-{ch2}")
+            self.mode_text.set_text(f"Mode TEST (simule) | paire AI{ch1}-{ch2}")
         else:
             if self.mcc.available:
-                self.status_text.set_text(f"Mode HARDWARE (MCC) | paire AI{ch1}-{ch2}")
+                self.mode_text.set_text(f"Mode HARDWARE (MCC) | paire AI{ch1}-{ch2}")
             else:
-                self.status_text.set_text("MCC indisponible → coche TEST (pip install mcculw + InstaCal)")
+                self.mode_text.set_text("MCC indisponible - cochez TEST (mcculw + InstaCal requis)")
         self.mvc_text.set_text(f"MVC1 = {self.mvc_values[0]:.3f} | MVC2 = {self.mvc_values[1]:.3f}")
+        self._update_envelope_labels()
+        self._update_guidance()
 
     def _on_pair_changed(self, label: str):
         if self.is_recording:
@@ -415,19 +441,23 @@ class EMGApp:
         self._update_status()
         self.fig.canvas.draw_idle()
 
-    def _on_toggle_test_checkbox(self, _label: str):
+    def _on_toggle_mode_checkbox(self, label: str):
         # ignore toggle while recording: revert checkbox to actual state (no desync)
         if self.is_recording:
-            desired = self.test_mode
-            current = bool(self.cb_test.get_status()[0])
+            idx = 0 if label == "TEST" else 1
+            desired = self.test_mode if idx == 0 else self.guided_mode
+            current = bool(self.cb_test.get_status()[idx])
             if current != desired:
-                self.cb_test.set_active(0)  # flip back
+                self.cb_test.set_active(idx)  # flip back
             return
 
-        self.test_mode = bool(self.cb_test.get_status()[0])
-        if self.test_mode:
-            self.sim.reset_record()
-            self.sim.reset_mvc()
+        if label == "TEST":
+            self.test_mode = bool(self.cb_test.get_status()[0])
+            if self.test_mode:
+                self.sim.reset_record()
+                self.sim.reset_mvc()
+        else:
+            self.guided_mode = bool(self.cb_test.get_status()[1])
         self._update_status()
         self.fig.canvas.draw_idle()
 
@@ -493,6 +523,10 @@ class EMGApp:
 
     # -------------- recording --------------
     def _start_recording(self):
+        if self.guided_mode and not all(self.mvc_values > 0):
+            self.status_text.set_text("Mesurez MVC 1 et MVC 2 avant d'enregistrer en mode GUIDE.")
+            self.fig.canvas.draw_idle()
+            return
         if (not self.test_mode) and (not self.mcc.available):
             self.status_text.set_text("MCC non disponible. Coche TEST.")
             self.fig.canvas.draw_idle()
@@ -512,6 +546,7 @@ class EMGApp:
         self.is_recording = True
         self.btn_rec.label.set_text("Stop")
         self.rec_text.set_text("REC")
+        self.status_text.set_text("Enregistrement en cours...")
         self._rec_blink = False
 
         # during recording: overlays hidden
@@ -688,7 +723,7 @@ class EMGApp:
         ax_raw.set_xlabel("Temps (s)")
         ax_env.set_xlabel("Temps (s)")
         ax_raw.set_ylabel("Activité (V)")
-        ax_env.set_ylabel("(%MVC)")
+        ax_env.set_ylabel("Enveloppe RMS (V)")
         ax_raw.set_title(f"EMG{which} MVC (5s)", color=col)
         ax_env.set_title(f"EMG{which} enveloppe MVC", color=col)
         ax_raw.set_xlim(0, MVC_DUR_SEC)
@@ -764,7 +799,7 @@ class EMGApp:
         mvc_val = float(np.median(top_vals))
         self.mvc_values[which - 1] = mvc_val
 
-        self.status_text.set_text(f"MVC{which} mesuré.")
+        self.status_text.set_text(f"MVC{which} mesuree. Calibration disponible pour EMG{which}.")
         self._update_status()
         self.fig.canvas.draw_idle()
 
@@ -804,15 +839,14 @@ class EMGApp:
 
         self.ax_env1.plot(t, env1n, color=COLOR_EMG1, lw=1.0)
         self.ax_env1.plot(t, env2n, color=COLOR_EMG2, lw=1.0, alpha=ALPHA_OVERLAY)
-        self.ax_env1.set_title("EMG1 filtré (normalisé)", color=COLOR_EMG1)
-        self.ax_env1.set_xlabel("Temps (s)"); self.ax_env1.set_ylabel("(%MVC)")
+        self.ax_env1.set_xlabel("Temps (s)")
         self.ax_env1.grid(True, alpha=0.25)
 
         self.ax_env2.plot(t, env2n, color=COLOR_EMG2, lw=1.0)
         self.ax_env2.plot(t, env1n, color=COLOR_EMG1, lw=1.0, alpha=ALPHA_OVERLAY)
-        self.ax_env2.set_title("EMG2 filtré (normalisé)", color=COLOR_EMG2)
-        self.ax_env2.set_xlabel("Temps (s)"); self.ax_env2.set_ylabel("(%MVC)")
+        self.ax_env2.set_xlabel("Temps (s)")
         self.ax_env2.grid(True, alpha=0.25)
+        self._update_envelope_labels()
 
         self.fig.canvas.draw_idle()
 
@@ -844,7 +878,9 @@ class EMGApp:
 
         out = np.column_stack([t, emg1, emg2, env1n, env2n])
         fname = time.strftime("emg_last_%Y%m%d_%H%M%S.csv")
-        header = "time_s,emg1_raw_V,emg2_raw_V,emg1_env_pctMVC,emg2_env_pctMVC"
+        env1_unit = "pctMVC" if mvc1 > 0 else "V"
+        env2_unit = "pctMVC" if mvc2 > 0 else "V"
+        header = f"time_s,emg1_raw_V,emg2_raw_V,emg1_env_{env1_unit},emg2_env_{env2_unit}"
         np.savetxt(fname, out, delimiter=",", header=header, comments="")
         self.status_text.set_text(f"CSV exporté: {fname}")
         self.fig.canvas.draw_idle()
