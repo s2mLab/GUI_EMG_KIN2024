@@ -25,18 +25,24 @@ Après une prise en main, l'étudiant devrait pouvoir :
 
 ## Fonctionnalités actuelles
 
-### Application Python
+### Applications Python
 
-Le fichier principal est `EMG_GUI_diligent.py`.
+Deux frontends partagent le même traitement et le même accès MCC :
 
 - affichage simultané de deux entrées analogiques, de `AI0-AI1` à `AI6-AI7`;
 - mode `TEST` simulant deux muscles et une perturbation secteur à 60 Hz;
 - acquisition à `2000 Hz` avec fenêtre d'affichage glissante de `5 s`;
+- parcours `GUIDE` indiquant les étapes MVC, enregistrement et export;
 - mesure MVC séparée pour chaque canal pendant `5 s`;
-- affichage du signal brut et d'une enveloppe RMS normalisée par la MVC;
+- rejet de 60 Hz, passe-bande `20-400 Hz` et enveloppe RMS normalisée par MVC;
+- alertes de saturation, bruit secteur, signal faible et MVC insuffisante;
 - affichage en direct par canal, puis superposition des deux courbes après
   l'arrêt de l'enregistrement;
 - export de la figure en PNG et du dernier enregistrement en CSV.
+
+`EMG_GUI_diligent.py` conserve une interface Matplotlib simple. Pour les
+séances temps réel, `EMG_GUI_pyqtgraph.py` fournit une interface Qt/PyQtGraph
+avec commandes plus grandes et rendu graphique plus fluide.
 
 ### Version MATLAB
 
@@ -53,16 +59,16 @@ L'application Python affiche quatre graphiques :
 | Graphique | Interprétation |
 | --- | --- |
 | `EMG1 brut`, `EMG2 brut` | tension enregistrée en volts; le signal oscille rapidement autour de zéro |
-| `EMG1 filtré (normalisé)`, `EMG2 filtré (normalisé)` | enveloppe RMS donnant une lecture plus simple de l'intensité d'activation |
+| `EMG1/EMG2 enveloppe RMS` ou `enveloppe normalisée` | enveloppe donnant une lecture plus simple de l'intensité d'activation |
 
 Une valeur en `%MVC` n'est interprétable qu'après avoir mesuré la MVC du
 canal correspondant. Avant cette étape, la courbe inférieure représente
-l'enveloppe non normalisée, même si l'axe conserve l'étiquette `%MVC`.
+l'enveloppe non normalisée et l'axe indique `Enveloppe RMS (V)`.
 
-Dans la version Python actuelle, la courbe appelée `filtré` repose sur une
-enveloppe RMS de `100 ms` et un retrait adaptatif de la moyenne. Elle
-n'applique pas encore le rejet de 60 Hz ni le passe-bande EMG que l'on trouve
-dans la version MATLAB.
+Dans les deux versions, la courbe d'enveloppe est calculée après rejet de
+`60 Hz` et passe-bande EMG `20-400 Hz`, puis lissée par RMS sur `100 ms`.
+L'axe reste en volts avant une MVC valide et passe en `%MVC` uniquement après
+calibration du canal.
 
 ## Démarrage rapide en mode TEST
 
@@ -78,6 +84,12 @@ Sur un poste Windows de laboratoire où le pilote MCC doit aussi être utilisé 
 conda env create -f environment.yml
 conda activate emg_mcc
 python EMG_GUI_diligent.py
+```
+
+Pour le frontend temps réel recommandé en laboratoire :
+
+```bash
+python EMG_GUI_pyqtgraph.py
 ```
 
 Pour explorer seulement le mode simulé sur un poste qui ne possède pas les
@@ -108,10 +120,9 @@ zéros.
 
 ## Utilisation avec une carte MCC
 
-Le dépôt contient le manuel d'une MCC USB-1208FS-PLUS et la version MATLAB
-nomme ce modèle. L'en-tête du script Python mentionne toutefois une
-USB-1206FS-PLUS : le modèle réellement disponible au laboratoire doit être
-confirmé avant une séance avec matériel.
+Le dépôt, les interfaces Python et MATLAB ciblent une MCC USB-1208FS-PLUS.
+Le modèle réellement disponible au laboratoire doit néanmoins être confirmé
+avant une séance avec matériel.
 
 Pour préparer le poste et démarrer :
 
@@ -143,28 +154,27 @@ Le CSV contient les colonnes suivantes :
 | --- | --- |
 | `time_s` | temps en secondes |
 | `emg1_raw_V`, `emg2_raw_V` | signaux bruts en volts |
-| `emg1_env_pctMVC`, `emg2_env_pctMVC` | enveloppes RMS; en `%MVC` seulement si les MVC ont été mesurées |
+| `emg1_env_pctMVC`, `emg2_env_pctMVC` | enveloppes RMS lorsque les MVC correspondantes ont été mesurées |
+| `emg1_env_V`, `emg2_env_V` | nom utilisé pour un canal exporté sans MVC valide en mode libre |
 
 ## Structure du dépôt
 
 | Fichier | Rôle |
 | --- | --- |
-| `EMG_GUI_diligent.py` | interface Python principale et simulation |
+| `EMG_GUI_diligent.py` | interface Python Matplotlib, traitement et acquisition |
+| `EMG_GUI_pyqtgraph.py` | interface Python Qt/PyQtGraph pour le temps réel |
 | `EMG_GUI_digilent.m` | variante MATLAB |
 | `environment.yml` | environnement Conda Python avec dépendance MCC |
 | `test_daq.py`, `test2.py` | essais simples d'accès à la carte avec `mcculw` |
+| `test_processing.py` | tests sans matériel du filtrage et du contrôle qualité |
 | `test_affichage.py` | prototype de rafraîchissement de l'affichage |
 | `test_api.m`, `test_wrapper.m` | essais de connexion MCC côté MATLAB |
 | `usb-1208fs-plus-users-guide.pdf` | documentation de la carte d'acquisition |
 
 ## Limites connues
 
-- Le backend matériel Python lit actuellement les échantillons un par un;
-  il n'exploite pas encore un balayage matériel avec tampon circulaire.
-- Le traitement Python ne possède pas encore le pipeline classique
-  rejet secteur plus passe-bande EMG présent en MATLAB.
-- Le modèle de carte MCC nommé dans le script Python n'est pas cohérent avec
-  le manuel inclus et doit être harmonisé.
+- Le balayage matériel MCC utilise les API `a_in_scan`/`AInScan`; un repli en
+  lecture ponctuelle reste prévu si un pilote ancien ne supporte pas ce mode.
 - La simulation Python est limitée à un essai de 5 secondes.
 - Les exports Python ne sauvegardent pas encore les métadonnées d'une séance
   (muscles, participant, placement, condition et valeurs MVC).
@@ -188,27 +198,28 @@ découvrent l'EMG, puis la robustesse d'une utilisation en laboratoire.
 
 | Priorité | Axe | Bénéfice attendu |
 | --- | --- | --- |
-| 1 | Parcours guidé `Préparer -> MVC -> Enregistrer -> Interpréter -> Exporter` | Réduit les erreurs de manipulation lors d'une première séance |
-| 2 | Axe affiché en volts avant la MVC, puis en `%MVC` après calibration | Évite de présenter comme normalisée une enveloppe qui ne l'est pas encore |
-| 3 | Rejet de 60 Hz et passe-bande EMG dans l'application Python | Rapproche la démonstration des pratiques de traitement expliquées en cours |
-| 4 | Acquisition MCC scannée avec tampon circulaire | Améliore la régularité de l'échantillonnage et la fluidité de l'affichage |
-| 5 | Alertes de saturation, bruit élevé et MVC insuffisante | Donne un retour immédiat sur la qualité du signal |
+| 1 | Parcours guidé `Préparer -> MVC -> Enregistrer -> Interpréter -> Exporter` | Implémenté dans Python et MATLAB |
+| 2 | Axe affiché en volts avant la MVC, puis en `%MVC` après calibration | Implémenté dans Python et MATLAB |
+| 3 | Rejet de 60 Hz et passe-bande EMG dans l'application Python | Implémenté et harmonisé avec MATLAB |
+| 4 | Acquisition MCC scannée avec tampon circulaire | Implémenté avec repli compatible |
+| 5 | Alertes de saturation, bruit élevé et MVC insuffisante | Implémenté dans Python et MATLAB |
 | 6 | Scénarios `TEST` plus longs et annotés | Permet d'enseigner bruit, coactivation et artefacts sans matériel |
-| 7 | Interface Qt/PyQtGraph avec commandes agrandies | Facilite l'usage en salle de laboratoire et le temps réel |
+| 7 | Interface Qt/PyQtGraph avec commandes agrandies | Frontend Python temps réel disponible |
 | 8 | Métadonnées de séance dans les exports | Rend les fichiers exploitables et traçables lors des travaux pratiques |
 | 9 | Sélection d'une période et statistiques simples de `%MVC` | Relie immédiatement le tracé à une question d'analyse |
 | 10 | Tests automatisés et diagnostic de connexion MCC | Sécurise les évolutions et réduit les problèmes de démarrage |
 
-Un premier lot d'implémentation raisonnable regrouperait les priorités `1`,
-`2`, `3` et `4` : elles améliorent à la fois la pédagogie, la validité de
-l'interprétation et les performances en acquisition réelle.
+Les priorités `1`, `2`, `3`, `4`, `5` et `7` forment maintenant le premier
+lot implémenté. Les priorités restantes portent sur les scénarios
+pédagogiques, les métadonnées et l'analyse de périodes choisies.
 
 ## Développement
 
 Pour vérifier rapidement la syntaxe du programme principal :
 
 ```bash
-python -m py_compile EMG_GUI_diligent.py
+python -m py_compile EMG_GUI_diligent.py EMG_GUI_pyqtgraph.py
+python -m unittest -v test_processing.py
 ```
 
 Les paramètres principaux (`FS`, durée MVC, taille de fenêtre RMS et cadence

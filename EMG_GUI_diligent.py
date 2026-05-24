@@ -1,22 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-EMG GUI (Python) - MCC USB-1208FS-PLUS (mcculw + InstaCal) OR TEST MODE
+EMG GUI (Python) - MCC USB-1208FS-PLUS (mcculw + InstaCal) OR TEST MODE.
 
-Corrections demandées:
-- Pendant l'acquisition ("Enregistrer"), chaque subplot n'affiche QUE son EMG (pas d'overlay).
-- Les 2 courbes (overlay) ne s'affichent qu'APRES avoir stoppé l'acquisition (affichage final).
-- Texte MVC déplacé vers la droite.
-- Autoscale Y en temps réel (axes bruts + filtrés) avec lissage et fréquence limitée.
-- Supprime les emojis (évite warnings de glyphes).
-- Rend l'UI plus fluide: ring buffer + copies sans concat, autoscale limité, draw_idle.
-
-Basé sur ton code fourni. :contentReference[oaicite:0]{index=0}
+The teaching interface guides MVC calibration, conditions EMG using notch
+and band-pass filters, reports common signal-quality problems, and uses
+hardware-paced scans when supported by the installed MCC driver.
 """
 
 from __future__ import annotations
 
 import time
+from ctypes import c_double
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Tuple, Optional
@@ -62,10 +57,8 @@ RANGE_NAME = "BIP5VOLTS"        # +/- 5 V
 # =========================
 class MccBackend:
     """
-    Minimal backend using mcculw.
-    Note: block read here is done via repeated a_in calls paced to fs.
-    If you later want higher performance, switch to UL scanning functions
-    (a_in_scan) with circular buffer.
+    MCC backend using hardware-paced scans when available.
+    A single-value fallback is kept for older UL/driver installations.
     """
     def __init__(self, board_num: int = BOARD_NUM, range_name: str = RANGE_NAME):
         self.board_num = board_num
@@ -74,10 +67,13 @@ class MccBackend:
         self._err = None
         try:
             from mcculw import ul
-            from mcculw.enums import ULRange
+            from mcculw.enums import ScanOptions, ULRange
             self.ul = ul
+            self.ScanOptions = ScanOptions
             self.ULRange = ULRange
             self.ul_range = getattr(ULRange, range_name)
+            self.scan_enabled = True
+            self.scan_error = None
             self._ok = True
         except Exception as e:
             self._ok = False
@@ -97,7 +93,23 @@ class MccBackend:
         except Exception:
             return float(raw)
 
-    def read_block(self, ch1: int, ch2: int, n: int, fs: int) -> np.ndarray:
+    def _read_block_scan(self, ch1: int, ch2: int, n: int, fs: int) -> np.ndarray:
+        count = n * 2
+        memhandle = self.ul.scaled_win_buf_alloc(count)
+        if memhandle == 0:
+            raise RuntimeError("Impossible d'allouer le tampon MCC.")
+        try:
+            self.ul.a_in_scan(
+                self.board_num, ch1, ch2, count, fs, self.ul_range, memhandle,
+                self.ScanOptions.SCALEDATA,
+            )
+            values = (c_double * count)()
+            self.ul.scaled_win_buf_to_array(memhandle, values, 0, count)
+            return np.ctypeslib.as_array(values).copy().reshape(n, 2)
+        finally:
+            self.ul.win_buf_free(memhandle)
+
+    def _read_block_single_value(self, ch1: int, ch2: int, n: int, fs: int) -> np.ndarray:
         block = np.empty((n, 2), dtype=float)
         t0 = perf_counter()
         for k in range(n):
@@ -108,6 +120,15 @@ class MccBackend:
             if dt < target:
                 time.sleep(target - dt)
         return block
+
+    def read_block(self, ch1: int, ch2: int, n: int, fs: int) -> np.ndarray:
+        if self.scan_enabled:
+            try:
+                return self._read_block_scan(ch1, ch2, n, fs)
+            except Exception as exc:
+                self.scan_enabled = False
+                self.scan_error = exc
+        return self._read_block_single_value(ch1, ch2, n, fs)
 
 
 # =========================
@@ -498,7 +519,8 @@ class EMGApp:
             self.mode_text.set_text(f"Mode TEST (simule) | paire AI{ch1}-{ch2}")
         else:
             if self.mcc.available:
-                self.mode_text.set_text(f"Mode HARDWARE (MCC) | paire AI{ch1}-{ch2}")
+                mode = "scan materiel" if self.mcc.scan_enabled else "lecture de secours"
+                self.mode_text.set_text(f"Mode HARDWARE (MCC, {mode}) | paire AI{ch1}-{ch2}")
             else:
                 self.mode_text.set_text("MCC indisponible - cochez TEST (mcculw + InstaCal requis)")
         self.mvc_text.set_text(f"MVC1 = {self.mvc_values[0]:.3f} | MVC2 = {self.mvc_values[1]:.3f}")

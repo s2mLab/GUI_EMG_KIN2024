@@ -43,6 +43,7 @@ function EMG_GUI_digilent()
     setappdata(f,'sampleIdx',0);
     setappdata(f,'test_mode',true);
     setappdata(f,'guided_mode',true);
+    setappdata(f,'hardware_scan_enabled',true);
     setappdata(f,'isRecording',false);
 
     setappdata(f,'sim_data',[]);
@@ -337,6 +338,7 @@ function EMG_GUI_digilent()
             setStatus('Mode TEST activé (données simulées).',[0.2 0.2 0.2]);
         else
             setappdata(f,'test_mode',false);
+            setappdata(f,'hardware_scan_enabled',true);
             setappdata(f,'sim_data',[]);
             setappdata(f,'sim_idx_record',1);
             setappdata(f,'sim_idx_mvc',1);
@@ -379,6 +381,28 @@ function EMG_GUI_digilent()
         end
     end
 
+    function block = mccReadBlockScan(board, range, ch1, ch2, nPts, Fs)
+        count = int32(nPts * 2);
+        memHandle = MccDaq.MccService.ScaledWinBufAllocEx(count);
+        if memHandle == 0
+            error('Impossible d''allouer le tampon MCC.');
+        end
+        cleanup = onCleanup(@() MccDaq.MccService.WinBufFreeEx(memHandle));
+        rate = int32(Fs);
+        err = board.AInScan(int32(ch1), int32(ch2), count, rate, range, ...
+            memHandle, MccDaq.ScanOptions.ScaleData);
+        if int32(err.Value) ~= 0
+            error('Erreur MCC AInScan: err=%d', int32(err.Value));
+        end
+        values = NET.createArray('System.Double', double(count));
+        err = MccDaq.MccService.ScaledWinBufToArray(memHandle, values, int32(0), count);
+        if int32(err.Value) ~= 0
+            error('Erreur MCC ScaledWinBufToArray: err=%d', int32(err.Value));
+        end
+        block = reshape(double(values), 2, nPts)';
+        clear cleanup
+    end
+
 
 
     % ============================
@@ -396,7 +420,7 @@ function EMG_GUI_digilent()
                 updateGuide();
                 return
             end
-            setappdata(f,'rawBuf',[]);
+            setappdata(f,'rawBuf',zeros(getappdata(f,'Fs')*60,2));
             setappdata(f,'sampleIdx',0);
             setappdata(f,'isRecording',true);
 
@@ -430,6 +454,8 @@ function EMG_GUI_digilent()
             setUIState('idle');
 
             rawBuf = getappdata(f,'rawBuf');
+            rawBuf = rawBuf(1:getappdata(f,'sampleIdx'),:);
+            setappdata(f,'rawBuf',rawBuf);
             updateSignalQuality(f, rawBuf, getappdata(f,'Fs'), [], []);
             if isempty(rawBuf)
                 return
@@ -452,11 +478,15 @@ function EMG_GUI_digilent()
             sampleIdx = getappdata(f,'sampleIdx');
 
             block = acquireBlockUnified('record', chunkPts); % Nx2
-            rawBuf = [rawBuf; block]; %#ok<AGROW>
+            N = size(block,1);
+            neededPts = sampleIdx + N;
+            if neededPts > size(rawBuf,1)
+                rawBuf = [rawBuf; zeros(Fs*60,2)]; %#ok<AGROW>
+            end
+            rawBuf(sampleIdx+1:neededPts,:) = block;
             setappdata(f,'rawBuf',rawBuf);
 
-            N = size(block,1);
-            sampleIdx = sampleIdx + N;
+            sampleIdx = neededPts;
             setappdata(f,'sampleIdx',sampleIdx);
 
             totalPts = sampleIdx;
@@ -742,20 +772,17 @@ function EMG_GUI_digilent()
             ch1 = getappdata(f,'chanNum1');
             ch2 = getappdata(f,'chanNum2');
         
-            block = zeros(nPts,2);
-            for k = 1:nPts
-                [err1, raw1] = mcc_board.AIn(int32(ch1), mcc_range);
-                [err2, raw2] = mcc_board.AIn(int32(ch2), mcc_range);
-        
-                if int32(err1.Value)~=0 || int32(err2.Value)~=0
-                    error('Erreur AIn: err1=%d err2=%d', int32(err1.Value), int32(err2.Value));
+            if getappdata(f,'hardware_scan_enabled')
+                try
+                    block = mccReadBlockScan(mcc_board, mcc_range, ch1, ch2, nPts, Fs);
+                    return
+                catch ME
+                    setappdata(f,'hardware_scan_enabled',false);
+                    setStatus('Scan MCC indisponible : lecture de secours active.', [0.75 0.35 0]);
+                    disp(getReport(ME,'extended'));
                 end
-        
-                [~, v1] = mcc_board.ToEngUnits(mcc_range, raw1);
-                [~, v2] = mcc_board.ToEngUnits(mcc_range, raw2);
-        
-                block(k,:) = [double(v1), double(v2)];
             end
+            block = mccReadBlock(mcc_board, mcc_range, ch1, ch2, nPts, Fs);
         end
     end
 

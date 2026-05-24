@@ -1,0 +1,4 @@
+__pycache__/
+*.py[cod]
+emg_graphs_*.png
+emg_last_*.csv
