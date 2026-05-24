@@ -82,6 +82,12 @@ function EMG_GUI_digilent()
             'FontSize',12,'HorizontalAlignment','left');
         setappdata(f,'mvcTxt',mvcTxt);
 
+        qualityTxt = uicontrol(f,'Style','text','String','Qualite : en attente de signal', ...
+            'Units','normalized','Position',[0.05,0.805,0.90,0.035], ...
+            'FontSize',11,'HorizontalAlignment','left', ...
+            'ForegroundColor',[0.25 0.25 0.25]);
+        setappdata(f,'qualityTxt',qualityTxt);
+
         % Popup pair
         pairList = arrayfun(@(k) sprintf('AI%d-%d',k,k+1), 0:6, 'UniformOutput', false);
         uicontrol(f,'Style','text','String','Paire EMG:', ...
@@ -424,7 +430,7 @@ function EMG_GUI_digilent()
             setUIState('idle');
 
             rawBuf = getappdata(f,'rawBuf');
-            warnIfSaturated(f, rawBuf, 4.90, 0.5);
+            updateSignalQuality(f, rawBuf, getappdata(f,'Fs'), [], []);
             if isempty(rawBuf)
                 return
             end
@@ -635,7 +641,7 @@ function EMG_GUI_digilent()
                 tsec = (0:numel(buf)-1)/Fs;
                 set(hRaw,'XData',tsec,'YData',buf);
 
-                env = sqrt(movmean((buf-mean(buf)).^2,100));
+                env = filterEMG(buf, Fs);
                 set(hFilt,'XData',tsec,'YData',env);
 
                 drawnow limitrate;
@@ -660,9 +666,16 @@ function EMG_GUI_digilent()
             return
         end
 
-        nTake = min(2000,numel(buf));
-        topVals = maxk(abs(buf),nTake);
+        envMVC = filterEMG(buf, Fs);
+        nTake = min(2000,numel(envMVC));
+        topVals = maxk(envMVC,nTake);
         mvcVal = median(topVals);
+        if mvcVal < 0.01
+            setUIState('idle');
+            setStatus(sprintf('MVC%d insuffisante : recommencez la mesure.',whichMVC), 'red');
+            updateSignalQuality(figHandle, buf, Fs, mvcVal, whichMVC);
+            return
+        end
 
         mvc = getappdata(figHandle,'mvc_values');
         if isempty(mvc), mvc=[0 0]; end
@@ -678,7 +691,7 @@ function EMG_GUI_digilent()
         setStatus(sprintf('MVC%d mesuré.', whichMVC), [0.2 0.2 0.2]);
         updateGuide();
 
-        warnIfSaturated(figHandle, buf, 4.90, 1);
+        updateSignalQuality(figHandle, buf, Fs, mvcVal, whichMVC);
     end
     
 
@@ -962,41 +975,55 @@ function sim = buildSimData(Fs)
 end
 
 
-function warnIfSaturated(figHandle, rawBuf, satV, satPctThreshold)
-% Calcule le % d'échantillons saturés (>|satV|) sur l'ensemble des canaux.
-% Affiche un message dans la GUI si le % dépasse satPctThreshold.
-
-    if nargin < 3 || isempty(satV), satV = 4.90; end
-    if nargin < 4 || isempty(satPctThreshold), satPctThreshold = 1; end
-
+function updateSignalQuality(figHandle, rawBuf, Fs, mvcValue, channelNumbers)
+% Reports saturation, weak signals, mains interference and insufficient MVC.
     if isempty(rawBuf) || ~isnumeric(rawBuf)
         return
     end
 
-    % Saturation: vrai si au moins un canal dépasse le seuil
-    satMask = any(rawBuf > satV | rawBuf < -satV, 2); % Nx1
+    messages = {};
+    satMask = any(abs(rawBuf) >= 4.90, 2);
     satPct  = 100 * (sum(satMask) / size(rawBuf,1));
-
-    % Crée/maj un texte d'alerte dans la GUI
-    warnTxt = [];
-    try
-        warnTxt = getappdata(figHandle,'satWarnTxt');
-    catch
+    if satPct > 0.5
+        messages{end+1} = sprintf('saturation %.1f%%',satPct); %#ok<AGROW>
     end
 
-    if isempty(warnTxt) || ~isvalid(warnTxt)
-        warnTxt = uicontrol(figHandle,'Style','text','String','', ...
-            'Units','normalized','Position',[0.05,0.85,0.85,0.04], ...
-            'FontSize',12,'FontWeight','bold','ForegroundColor',[0.85 0 0], ...
-            'BackgroundColor',get(figHandle,'Color'), ...
-            'HorizontalAlignment','left');
-        setappdata(figHandle,'satWarnTxt',warnTxt);
+    for channel = 1:size(rawBuf,2)
+        if isempty(channelNumbers)
+            channelNumber = channel;
+        else
+            channelNumber = channelNumbers(channel);
+        end
+        x = rawBuf(:,channel) - mean(rawBuf(:,channel));
+        if std(x) < 0.005
+            messages{end+1} = sprintf('EMG%d tres faible',channelNumber); %#ok<AGROW>
+            continue
+        end
+        if numel(x) >= Fs
+            n = numel(x);
+            power = abs(fft(x)).^2;
+            freq = (0:n-1)' * Fs / n;
+            bandPower = sum(power(freq>=20 & freq<=400));
+            linePower = sum(power(freq>=59 & freq<=61));
+            if bandPower > 0 && linePower / bandPower > 0.25
+                messages{end+1} = sprintf('EMG%d bruit 60 Hz eleve',channelNumber); %#ok<AGROW>
+            end
+        end
     end
 
-    if satPct > satPctThreshold
-        set(warnTxt,'String',sprintf(['%.1f%% de votre essai présente des valeurs saturées. ' ...
-            'Réduire l''amplification dans le logiciel LINK15'], satPct));
+    if ~isempty(mvcValue) && mvcValue < 0.01
+        messages{end+1} = 'MVC trop faible'; %#ok<AGROW>
+    end
+
+    qualityTxt = getappdata(figHandle,'qualityTxt');
+    if isempty(qualityTxt) || ~isvalid(qualityTxt)
+        return
+    end
+    if isempty(messages)
+        set(qualityTxt,'String','Qualite : signal exploitable', ...
+            'ForegroundColor',[0 0.45 0.20]);
     else
-        set(warnTxt,'String',''); % pas d'alerte
+        set(qualityTxt,'String',['Qualite : attention - ' strjoin(messages,'; ')], ...
+            'ForegroundColor',[0.75 0.10 0.05]);
     end
 end

@@ -24,6 +24,7 @@ from typing import Tuple, Optional
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button, RadioButtons, CheckButtons
+from scipy.signal import butter, iirnotch, sosfilt, sosfilt_zi, sosfiltfilt, tf2sos, welch
 
 # =========================
 # CONFIG
@@ -36,6 +37,9 @@ MVC_DUR_SEC = 5
 
 RMS_WIN_MS = 100
 RMS_WIN = int(FS * RMS_WIN_MS / 1000)
+LINE_FREQ_HZ = 60.0
+SATURATION_V = 4.90
+MIN_MVC_ENV_V = 0.01
 
 # Autoscale
 AUTOSCALE_HZ = 6
@@ -203,18 +207,14 @@ class SimBackend:
 
 
 # =========================
-# FAST STREAMING RMS ENVELOPE
+# EMG CONDITIONING AND RMS ENVELOPE
 # =========================
 class EnvelopeRMS:
     """
-    Streaming RMS envelope with:
-    - adaptive mean removal (EMA)
-    - fixed-size ring buffer for squared values
+    Streaming RMS envelope computed on a previously conditioned signal.
     """
-    def __init__(self, win: int = RMS_WIN, alpha_mean: float = 0.01):
+    def __init__(self, win: int = RMS_WIN):
         self.win = max(1, int(win))
-        self.alpha_mean = float(alpha_mean)
-        self._mean = 0.0
         self._sqbuf = np.zeros(self.win, dtype=float)
         self._sqsum = 0.0
         self._p = 0
@@ -224,9 +224,7 @@ class EnvelopeRMS:
         x = np.asarray(x, dtype=float)
         y = np.empty_like(x)
         for i, xi in enumerate(x):
-            self._mean = (1 - self.alpha_mean) * self._mean + self.alpha_mean * xi
-            xc = xi - self._mean
-            sq = xc * xc
+            sq = xi * xi
 
             self._sqsum -= self._sqbuf[self._p]
             self._sqbuf[self._p] = sq
@@ -236,6 +234,69 @@ class EnvelopeRMS:
             self._filled = min(self.win, self._filled + 1)
             y[i] = np.sqrt(max(0.0, self._sqsum / self._filled))
         return y
+
+
+def _emg_filter_sos(fs: int) -> np.ndarray:
+    notch_b, notch_a = iirnotch(LINE_FREQ_HZ, 30.0, fs=fs)
+    notch_sos = tf2sos(notch_b, notch_a)
+    band_sos = butter(4, [20.0, 400.0], btype="bandpass", fs=fs, output="sos")
+    return np.vstack([notch_sos, band_sos])
+
+
+def process_emg_offline(raw: np.ndarray, fs: int) -> Tuple[np.ndarray, np.ndarray]:
+    raw = np.asarray(raw, dtype=float)
+    centered = raw - np.mean(raw) if raw.size else raw
+    sos = _emg_filter_sos(fs)
+    if centered.size > 3 * (2 * len(sos) + 1):
+        filtered = sosfiltfilt(sos, centered)
+    else:
+        filtered = sosfilt(sos, centered)
+    if filtered.size == 0:
+        return filtered, filtered
+    win = min(RMS_WIN, filtered.size)
+    kernel = np.ones(win, dtype=float) / win
+    envelope = np.sqrt(np.convolve(filtered * filtered, kernel, mode="same"))
+    return filtered, envelope
+
+
+class EMGStreamProcessor:
+    """Streaming notch, band-pass and RMS processor for one EMG channel."""
+
+    def __init__(self, fs: int):
+        self.sos = _emg_filter_sos(fs)
+        self.zi = sosfilt_zi(self.sos) * 0.0
+        self.rms = EnvelopeRMS(RMS_WIN)
+
+    def process(self, raw: np.ndarray) -> np.ndarray:
+        filtered, self.zi = sosfilt(self.sos, np.asarray(raw, dtype=float), zi=self.zi)
+        return self.rms.process(filtered)
+
+
+def signal_quality_messages(raw: np.ndarray, fs: int, names: Optional[list[str]] = None) -> list[str]:
+    raw = np.asarray(raw, dtype=float)
+    if raw.ndim == 1:
+        raw = raw[:, None]
+    if raw.size == 0:
+        return []
+
+    messages = []
+    sat_pct = 100.0 * np.mean(np.any(np.abs(raw) >= SATURATION_V, axis=1))
+    if sat_pct > 0.5:
+        messages.append(f"saturation {sat_pct:.1f}%")
+
+    for channel in range(raw.shape[1]):
+        name = names[channel] if names and channel < len(names) else f"EMG{channel + 1}"
+        x = raw[:, channel]
+        if np.std(x) < 0.005:
+            messages.append(f"{name} tres faible")
+            continue
+        if x.size >= fs:
+            freq, power = welch(x - np.mean(x), fs=fs, nperseg=min(x.size, fs))
+            band_power = power[(freq >= 20) & (freq <= 400)].sum()
+            line_power = power[(freq >= 59) & (freq <= 61)].sum()
+            if band_power > 0 and line_power / band_power > 0.25:
+                messages.append(f"{name} bruit 60 Hz eleve")
+    return messages
 
 
 # =========================
@@ -273,8 +334,8 @@ class EMGApp:
         self._plot_env1 = np.zeros(self.buf_len, dtype=float)
         self._plot_env2 = np.zeros(self.buf_len, dtype=float)
 
-        self.envproc1 = EnvelopeRMS(RMS_WIN)
-        self.envproc2 = EnvelopeRMS(RMS_WIN)
+        self.envproc1 = EMGStreamProcessor(self.fs)
+        self.envproc2 = EMGStreamProcessor(self.fs)
 
         # Full recording storage (only during record)
         self.full_record = []
@@ -312,6 +373,8 @@ class EMGApp:
                                         weight="bold", color=(0.08, 0.20, 0.45))
         self.mode_text = self.fig.text(0.06, 0.937, "", fontsize=11, ha="left")
         self.status_text = self.fig.text(0.06, 0.902, "Pret.", fontsize=11, ha="left")
+        self.quality_text = self.fig.text(0.06, 0.730, "Qualite : en attente de signal",
+                                          fontsize=11, ha="left", color=(0.25, 0.25, 0.25))
         self.mvc_text = self.fig.text(0.72, 0.937, "", fontsize=11, ha="left")
         self.rec_text = self.fig.text(0.48, 0.937, "", fontsize=12, ha="left",
                                       color="red", weight="bold")
@@ -419,6 +482,15 @@ class EMGApp:
         else:
             instruction = "Etape 4/4 - Interpretez les courbes puis exportez PNG ou CSV."
         self.guide_text.set_text(instruction)
+
+    def _set_quality(self, raw: np.ndarray, names: Optional[list[str]] = None):
+        messages = signal_quality_messages(raw, self.fs, names)
+        if messages:
+            self.quality_text.set_color((0.75, 0.10, 0.05))
+            self.quality_text.set_text("Qualite : attention - " + "; ".join(messages))
+        else:
+            self.quality_text.set_color((0.0, 0.45, 0.20))
+            self.quality_text.set_text("Qualite : signal exploitable")
 
     def _update_status(self):
         ch1, ch2 = self._selected_channels()
@@ -539,8 +611,8 @@ class EMGApp:
         self.env2[:] = 0
         self._write_pos = 0
         self._filled = 0
-        self.envproc1 = EnvelopeRMS(RMS_WIN)
-        self.envproc2 = EnvelopeRMS(RMS_WIN)
+        self.envproc1 = EMGStreamProcessor(self.fs)
+        self.envproc2 = EMGStreamProcessor(self.fs)
         self.full_record = []
 
         self.is_recording = True
@@ -574,6 +646,7 @@ class EMGApp:
 
         rawBuf = np.vstack(self.full_record)
         self.recordings_raw.append(rawBuf)
+        self._set_quality(rawBuf)
 
         # after stop: show final with overlays
         self._plot_final(rawBuf)
@@ -742,7 +815,7 @@ class EMGApp:
         (line_raw,) = ax_raw.plot(t, y_raw, color=col, lw=1.0)
         (line_env,) = ax_env.plot(t, y_env, color=col, lw=1.0)
 
-        envproc = EnvelopeRMS(RMS_WIN)
+        envproc = EMGStreamProcessor(self.fs)
 
         idx = 0
         next_t = perf_counter()
@@ -755,12 +828,8 @@ class EMGApp:
             # Fill the preallocated arrays
             y_raw[idx:idx + n_this] = x
 
-            # Compute envelope only on the acquired portion
-            x_all = y_raw[:idx + n_this]
-            env_all = envproc.process(np.nan_to_num(x_all, nan=0.0))
-
-            # Put envelope back into the preallocated y_env (rest stays NaN)
-            y_env[:idx + n_this] = env_all
+            # Process each new block exactly once through the streaming filter.
+            y_env[idx:idx + n_this] = envproc.process(x)
 
             idx += n_this
 
@@ -793,10 +862,16 @@ class EMGApp:
             self.fig.canvas.draw_idle()
             return
 
-        # Compute MVC value
-        n_take = min(2000, x_final.size)
-        top_vals = np.partition(np.abs(x_final), -n_take)[-n_take:]
+        acquired_env = y_env[:idx]
+        acquired_env = acquired_env[np.isfinite(acquired_env)]
+        n_take = min(2000, acquired_env.size)
+        top_vals = np.partition(acquired_env, -n_take)[-n_take:]
         mvc_val = float(np.median(top_vals))
+        self._set_quality(x_final, [f"EMG{which}"])
+        if mvc_val < MIN_MVC_ENV_V:
+            self.status_text.set_text(f"MVC{which} insuffisante : recommencez la mesure.")
+            self.fig.canvas.draw_idle()
+            return
         self.mvc_values[which - 1] = mvc_val
 
         self.status_text.set_text(f"MVC{which} mesuree. Calibration disponible pour EMG{which}.")
@@ -812,10 +887,8 @@ class EMGApp:
         emg2 = rawBuf[:, 1]
         t = np.arange(rawBuf.shape[0]) / self.fs
 
-        envproc1 = EnvelopeRMS(RMS_WIN)
-        envproc2 = EnvelopeRMS(RMS_WIN)
-        env1 = envproc1.process(emg1)
-        env2 = envproc2.process(emg2)
+        _, env1 = process_emg_offline(emg1, self.fs)
+        _, env2 = process_emg_offline(emg2, self.fs)
 
         mvc1, mvc2 = self.mvc_values
         env1n = 100.0 * env1 / mvc1 if mvc1 > 0 else env1
@@ -867,10 +940,8 @@ class EMGApp:
         emg1 = rawBuf[:, 0]
         emg2 = rawBuf[:, 1]
 
-        envproc1 = EnvelopeRMS(RMS_WIN)
-        envproc2 = EnvelopeRMS(RMS_WIN)
-        env1 = envproc1.process(emg1)
-        env2 = envproc2.process(emg2)
+        _, env1 = process_emg_offline(emg1, self.fs)
+        _, env2 = process_emg_offline(emg2, self.fs)
 
         mvc1, mvc2 = self.mvc_values
         env1n = 100.0 * env1 / mvc1 if mvc1 > 0 else env1
