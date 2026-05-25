@@ -140,6 +140,30 @@ La plage d'acquisition configurée dans le script Python est `+/- 5 V`
 procédures du laboratoire concernant préparation de la peau, placement,
 amplification, sécurité électrique et consentement.
 
+### Dépannage MATLAB : `MccDaq` introuvable
+
+Le message `MccDaq could not be found in the .NET global assembly cache`
+signifie que MATLAB n'a pas trouvé l'assembly `.NET` de Measurement Computing
+par son nom. Il apparaît lorsque le mode matériel est activé et que
+Universal Library for .NET n'est pas installée, ou lorsque `MccDaq.dll` est
+installée localement mais n'est pas enregistrée dans le cache global `.NET`.
+
+La version MATLAB utilise `load_mccdaq_assembly.m`, qui essaie
+automatiquement le cache global puis les emplacements usuels :
+
+- `C:\Program Files\Measurement Computing\DAQ\MccDaq.dll`;
+- `C:\Program Files (x86)\Measurement Computing\DAQ\MccDaq.dll`.
+
+Sur le poste d'acquisition :
+
+1. Vérifier que `.NET Framework 4.0` ou plus récent est installé, puis
+   installer Measurement Computing Universal Library avec la prise en charge
+   `.NET` et InstaCal.
+2. Configurer la carte comme carte `0` dans InstaCal.
+3. Dans MATLAB, exécuter `load_mccdaq_assembly` pour vérifier le chargement.
+4. Si la DLL est installée dans un autre dossier, définir son répertoire avec
+   `setenv('MCCDAQ_DIR', 'C:\chemin\vers\DAQ')`, puis relancer la commande.
+
 ## Export des résultats
 
 Dans l'application Python, les fichiers sont écrits dans le dossier depuis
@@ -169,6 +193,7 @@ Le CSV contient les colonnes suivantes :
 | `test_processing.py` | tests sans matériel du filtrage et du contrôle qualité |
 | `test_affichage.py` | prototype de rafraîchissement de l'affichage |
 | `test_api.m`, `test_wrapper.m` | essais de connexion MCC côté MATLAB |
+| `load_mccdaq_assembly.m` | chargement robuste et diagnostic de la DLL MCC pour MATLAB |
 | `usb-1208fs-plus-users-guide.pdf` | documentation de la carte d'acquisition |
 
 ## Limites connues

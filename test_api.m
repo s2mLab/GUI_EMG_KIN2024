@@ -1,4 +1,4 @@
-NET.addAssembly('MccDaq');
+load_mccdaq_assembly();
 
 b = MccDaq.MccBoard(0);
 chan  = 0;

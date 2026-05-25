@@ -294,7 +294,8 @@ function EMG_GUI_digilent()
 
         try
             if isempty(getappdata(f,'mcc_board'))
-                NET.addAssembly('MccDaq');
+                assemblyPath = load_mccdaq_assembly();
+                setappdata(f,'mcc_assembly_path',assemblyPath);
                 setappdata(f,'mcc_board',MccDaq.MccBoard(getappdata(f,'boardNum')));
                 setappdata(f,'mcc_range',MccDaq.Range.Bip5Volts);
             end
@@ -314,7 +315,7 @@ function EMG_GUI_digilent()
         
             setStatus(sprintf('MCC détectée (.NET) | paire AI%d-%d',ch1,ch2), 'green');
         catch ME
-            setStatus('Erreur MCC (.NET). Activez TEST si besoin.', 'red');
+            setStatus('MccDaq introuvable. Installez UL .NET ou activez TEST.', 'red');
             disp(getReport(ME,'extended'));
         end
 

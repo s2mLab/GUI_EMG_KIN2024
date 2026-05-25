@@ -10,9 +10,9 @@ pathsToCheck = {
 for i=1:numel(pathsToCheck)
     p = pathsToCheck{i};
     if isfolder(p)
-        files = dir(fullfile(p,'**','cbAIn.*'));
+        files = dir(fullfile(p,'**','MccDaq.dll'));
         if ~isempty(files)
-            disp("Trouvé dans: " + files(1).folder);
+            disp("MccDaq.dll trouvée dans: " + files(1).folder);
             disp({files.name}');
         end
     end
