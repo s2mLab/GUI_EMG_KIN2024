@@ -18,8 +18,13 @@ from typing import Tuple, Optional
 
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.widgets import Button, RadioButtons, CheckButtons
+from matplotlib.widgets import Button, CheckButtons, RadioButtons, Slider
 from scipy.signal import butter, iirnotch, sosfilt, sosfilt_zi, sosfiltfilt, tf2sos, welch
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 
 # =========================
 # CONFIG
@@ -336,6 +341,14 @@ class EMGApp:
         self.mvc_values = np.array([0.0, 0.0], dtype=float)
         self.recordings_raw = []
         self.pair_idx = 0  # 0..6 => AI0-1..AI6-7
+        self.camera = None
+        self.video_writer = None
+        self.video_path = None
+        self.video_reader = None
+        self.video_fps = max(1.0, FS / CHUNK_PTS)
+        self.video_frame_count = 0
+        self._video_playing = False
+        self._updating_video_slider = False
 
         # Backends
         self.mcc = MccBackend()
@@ -387,7 +400,7 @@ class EMGApp:
         self.fig = plt.figure(figsize=(14.0, 8.0))
         self.fig.canvas.manager.set_window_title("EMG Acquisition (MCC / TEST)")
 
-        self.fig.subplots_adjust(left=0.06, right=0.98, top=0.72, bottom=0.12,
+        self.fig.subplots_adjust(left=0.06, right=0.72, top=0.72, bottom=0.12,
                                  wspace=0.18, hspace=0.35)
 
         self.guide_text = self.fig.text(0.06, 0.972, "", fontsize=12, ha="left",
@@ -405,6 +418,10 @@ class EMGApp:
         self.ax_raw2 = self.fig.add_subplot(2, 2, 2)
         self.ax_env1 = self.fig.add_subplot(2, 2, 3)
         self.ax_env2 = self.fig.add_subplot(2, 2, 4)
+        self.ax_video = self.fig.add_axes([0.76, 0.34, 0.22, 0.30])
+        self.ax_video.set_title("Webcam")
+        self.ax_video.axis("off")
+        self.video_image = None
 
         self._style_axes()
 
@@ -430,6 +447,8 @@ class EMGApp:
 
         ax_exp_png = self.fig.add_axes([0.74, 0.02, 0.11, 0.07])
         ax_exp_csv = self.fig.add_axes([0.86, 0.02, 0.11, 0.07])
+        ax_video_slider = self.fig.add_axes([0.77, 0.26, 0.19, 0.03])
+        ax_video_play = self.fig.add_axes([0.80, 0.18, 0.13, 0.055])
 
         pair_labels = [f"AI{k}-{k+1}" for k in range(7)]
         self.rb_pair = RadioButtons(ax_pair, pair_labels, active=self.pair_idx)
@@ -451,6 +470,10 @@ class EMGApp:
         self.btn_csv = Button(ax_exp_csv, "Exporter CSV")
         self.btn_png.on_clicked(self._export_png)
         self.btn_csv.on_clicked(self._export_csv)
+        self.video_slider = Slider(ax_video_slider, "Video", 0, 1, valinit=0, valstep=1)
+        self.video_slider.on_changed(self._seek_video)
+        self.btn_video = Button(ax_video_play, "Lire video")
+        self.btn_video.on_clicked(self._play_video)
 
         self.fig.canvas.mpl_connect("close_event", self._on_close)
 
@@ -513,6 +536,113 @@ class EMGApp:
             self.quality_text.set_color((0.0, 0.45, 0.20))
             self.quality_text.set_text("Qualite : signal exploitable")
 
+    def _show_video_frame(self, frame_rgb: np.ndarray):
+        if self.video_image is None:
+            self.video_image = self.ax_video.imshow(frame_rgb)
+            self.ax_video.axis("off")
+        else:
+            self.video_image.set_data(frame_rgb)
+        self.fig.canvas.draw_idle()
+
+    def _start_video_capture(self):
+        self._close_video_reader()
+        self.video_path = None
+        if cv2 is None:
+            self.status_text.set_text("OpenCV absent : EMG enregistre sans video.")
+            return
+        self.camera = cv2.VideoCapture(0)
+        if not self.camera.isOpened():
+            self.camera.release()
+            self.camera = None
+            self.status_text.set_text("Webcam indisponible : EMG enregistre sans video.")
+            return
+        ok, frame = self.camera.read()
+        if not ok:
+            self.camera.release()
+            self.camera = None
+            return
+        height, width = frame.shape[:2]
+        self.video_path = time.strftime("emg_video_%Y%m%d_%H%M%S.mp4")
+        self.video_writer = cv2.VideoWriter(
+            self.video_path, cv2.VideoWriter_fourcc(*"mp4v"), self.video_fps, (width, height)
+        )
+        if not self.video_writer.isOpened():
+            self.camera.release()
+            self.camera = None
+            self.video_writer = None
+            self.video_path = None
+            self.status_text.set_text("Creation MP4 impossible : EMG enregistre sans video.")
+            return
+        self.video_writer.write(frame)
+        self._show_video_frame(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+
+    def _capture_video_frame(self):
+        if self.camera is None or self.video_writer is None:
+            return
+        ok, frame = self.camera.read()
+        if ok:
+            self.video_writer.write(frame)
+            self._show_video_frame(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+
+    def _stop_video_capture(self):
+        if self.video_writer is not None:
+            self.video_writer.release()
+            self.video_writer = None
+        if self.camera is not None:
+            self.camera.release()
+            self.camera = None
+        if cv2 is None or not self.video_path:
+            return
+        self.video_reader = cv2.VideoCapture(self.video_path)
+        if not self.video_reader.isOpened():
+            self.video_reader = None
+            return
+        self.video_fps = self.video_reader.get(cv2.CAP_PROP_FPS) or self.video_fps
+        self.video_frame_count = int(self.video_reader.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.video_slider.valmax = max(1, self.video_frame_count - 1)
+        self.video_slider.ax.set_xlim(self.video_slider.valmin, self.video_slider.valmax)
+        self._updating_video_slider = True
+        self.video_slider.set_val(0)
+        self._updating_video_slider = False
+        self._seek_video(0)
+
+    def _close_video_reader(self):
+        self._video_playing = False
+        self.btn_video.label.set_text("Lire video")
+        if self.video_reader is not None:
+            self.video_reader.release()
+            self.video_reader = None
+
+    def _seek_video(self, value):
+        if self.video_reader is None or self._updating_video_slider:
+            return
+        frame_index = int(round(value))
+        self.video_reader.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        ok, frame = self.video_reader.read()
+        if ok:
+            self._show_video_frame(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+
+    def _play_video(self, _evt):
+        if self.video_reader is None:
+            return
+        if self._video_playing:
+            self._video_playing = False
+            self.btn_video.label.set_text("Lire video")
+            return
+        self._video_playing = True
+        self.btn_video.label.set_text("Pause")
+        while self._video_playing and plt.fignum_exists(self.fig.number):
+            next_frame = int(round(self.video_slider.val)) + 1
+            if next_frame >= self.video_frame_count:
+                break
+            self._updating_video_slider = True
+            self.video_slider.set_val(next_frame)
+            self._updating_video_slider = False
+            self._seek_video(next_frame)
+            plt.pause(1.0 / max(self.video_fps, 1.0))
+        self._video_playing = False
+        self.btn_video.label.set_text("Lire video")
+
     def _update_status(self):
         ch1, ch2 = self._selected_channels()
         if self.test_mode:
@@ -563,6 +693,8 @@ class EMGApp:
 
     def _on_close(self, _evt):
         self.is_recording = False
+        self._stop_video_capture()
+        self._close_video_reader()
 
     # -------------- acquisition / ring buffer --------------
     def _acquire_block(self, kind: str, n: int) -> np.ndarray:
@@ -648,6 +780,7 @@ class EMGApp:
 
         if self.test_mode:
             self.sim.reset_record()
+        self._start_video_capture()
 
         # reset axis view to live mode without clearing widgets
         self._reset_live_view()
@@ -662,6 +795,7 @@ class EMGApp:
         self.btn_rec.label.set_text("Enregistrer")
         self.rec_text.set_text("")
         self._rec_blink = False
+        self._stop_video_capture()
 
         if len(self.full_record) == 0:
             return
@@ -690,6 +824,7 @@ class EMGApp:
             block = self._acquire_block(kind="record", n=self.chunk_pts)
             self.full_record.append(block)
             self._push_block(block)
+            self._capture_video_frame()
             self._next_acq_t += self.chunk_sec
             n_catch += 1
             now = perf_counter()

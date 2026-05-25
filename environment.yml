@@ -16,6 +16,7 @@ dependencies:
   - matplotlib
   - pyqt      # backend GUI robuste (Qt)
   - pyqtgraph # optionnel mais excellent pour streaming temps réel
+  - opencv    # webcam + lecture video dans les interfaces Python
 
   # --- Utilities ---
   - pip

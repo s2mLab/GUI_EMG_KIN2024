@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import time
 
+import cv2
 import numpy as np
 import pyqtgraph as pg
-from pyqtgraph.Qt import QtCore, QtWidgets
+from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from EMG_GUI_diligent import (
     CHUNK_PTS,
@@ -39,6 +40,12 @@ class EMGRealtimeWindow(QtWidgets.QMainWindow):
         self.full_blocks = []
         self.display_raw = np.empty((0, 2))
         self.display_env = np.empty((0, 2))
+        self.camera = None
+        self.video_writer = None
+        self.video_path = None
+        self.video_reader = None
+        self.video_fps = max(1.0, self.fs / CHUNK_PTS)
+        self.video_frame_count = 0
         self.sim = SimBackend(build_sim_data(self.fs))
         self.mcc = MccBackend()
         self.processors = [EMGStreamProcessor(self.fs), EMGStreamProcessor(self.fs)]
@@ -48,6 +55,8 @@ class EMGRealtimeWindow(QtWidgets.QMainWindow):
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._tick)
         self.timer.setInterval(int(1000 * CHUNK_PTS / self.fs))
+        self.video_timer = QtCore.QTimer(self)
+        self.video_timer.timeout.connect(self._next_video_frame)
 
     def _build_ui(self):
         root = QtWidgets.QWidget()
@@ -98,13 +107,34 @@ class EMGRealtimeWindow(QtWidgets.QMainWindow):
         controls.addStretch()
         layout.addLayout(controls)
 
+        content = QtWidgets.QHBoxLayout()
         grid = QtWidgets.QGridLayout()
         self.plots = [pg.PlotWidget() for _ in range(4)]
         for idx, plot in enumerate(self.plots):
             plot.showGrid(x=True, y=True, alpha=0.25)
             plot.setLabel("bottom", "Temps", units="s")
             grid.addWidget(plot, idx // 2, idx % 2)
-        layout.addLayout(grid)
+        content.addLayout(grid, stretch=4)
+
+        video_panel = QtWidgets.QVBoxLayout()
+        self.video_label = QtWidgets.QLabel("Webcam\nLa video apparaitra pendant l'enregistrement.")
+        self.video_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.video_label.setMinimumSize(320, 240)
+        self.video_label.setStyleSheet("background: #151515; color: white;")
+        video_panel.addWidget(self.video_label)
+        self.video_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self.video_slider.setEnabled(False)
+        self.video_slider.sliderMoved.connect(self._seek_video)
+        video_panel.addWidget(self.video_slider)
+        self.video_time_label = QtWidgets.QLabel("Video : aucune capture")
+        video_panel.addWidget(self.video_time_label)
+        self.play_video_btn = QtWidgets.QPushButton("Lire video")
+        self.play_video_btn.setEnabled(False)
+        self.play_video_btn.clicked.connect(self._toggle_video_playback)
+        video_panel.addWidget(self.play_video_btn)
+        video_panel.addStretch()
+        content.addLayout(video_panel, stretch=2)
+        layout.addLayout(content)
 
         self.raw_curves = [
             self.plots[0].plot(pen=pg.mkPen("#0072bd", width=1)),
@@ -198,6 +228,127 @@ class EMGRealtimeWindow(QtWidgets.QMainWindow):
         self.mvc1_btn.setEnabled(not locked)
         self.mvc2_btn.setEnabled(not locked)
 
+    def _show_video_frame(self, frame_rgb: np.ndarray):
+        height, width, channels = frame_rgb.shape
+        bytes_per_line = channels * width
+        image = QtGui.QImage(
+            frame_rgb.data, width, height, bytes_per_line, QtGui.QImage.Format.Format_RGB888
+        ).copy()
+        pixmap = QtGui.QPixmap.fromImage(image).scaled(
+            self.video_label.size(),
+            QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+            QtCore.Qt.TransformationMode.SmoothTransformation,
+        )
+        self.video_label.setPixmap(pixmap)
+
+    def _start_video_capture(self):
+        self._close_video_reader()
+        self.video_path = None
+        self.video_slider.setEnabled(False)
+        self.play_video_btn.setEnabled(False)
+        self.camera = cv2.VideoCapture(0)
+        if not self.camera.isOpened():
+            self.camera.release()
+            self.camera = None
+            self.quality_label.setText("Webcam indisponible : EMG enregistre sans video.")
+            return
+        ok, frame = self.camera.read()
+        if not ok:
+            self.camera.release()
+            self.camera = None
+            self.quality_label.setText("Impossible de lire la webcam : EMG seul.")
+            return
+        height, width = frame.shape[:2]
+        self.video_path = time.strftime("emg_video_%Y%m%d_%H%M%S.mp4")
+        self.video_writer = cv2.VideoWriter(
+            self.video_path,
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            self.video_fps,
+            (width, height),
+        )
+        if not self.video_writer.isOpened():
+            self.camera.release()
+            self.camera = None
+            self.video_writer.release()
+            self.video_writer = None
+            self.video_path = None
+            self.quality_label.setText("Creation MP4 impossible : EMG enregistre sans video.")
+            return
+        self.video_writer.write(frame)
+        self._show_video_frame(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        self.video_time_label.setText("Video : enregistrement webcam en cours")
+
+    def _capture_video_frame(self):
+        if self.camera is None or self.video_writer is None:
+            return
+        ok, frame = self.camera.read()
+        if not ok:
+            return
+        self.video_writer.write(frame)
+        self._show_video_frame(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+
+    def _stop_video_capture(self):
+        if self.video_writer is not None:
+            self.video_writer.release()
+            self.video_writer = None
+        if self.camera is not None:
+            self.camera.release()
+            self.camera = None
+        if not self.video_path:
+            return
+        self.video_reader = cv2.VideoCapture(self.video_path)
+        if not self.video_reader.isOpened():
+            self.video_reader = None
+            self.video_time_label.setText("Video : fichier illisible")
+            return
+        self.video_fps = self.video_reader.get(cv2.CAP_PROP_FPS) or self.video_fps
+        self.video_frame_count = int(self.video_reader.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.video_slider.setRange(0, max(0, self.video_frame_count - 1))
+        self.video_slider.setValue(0)
+        self.video_slider.setEnabled(self.video_frame_count > 0)
+        self.play_video_btn.setEnabled(self.video_frame_count > 0)
+        self._seek_video(0)
+
+    def _close_video_reader(self):
+        self.video_timer.stop()
+        self.play_video_btn.setText("Lire video")
+        if self.video_reader is not None:
+            self.video_reader.release()
+            self.video_reader = None
+
+    def _seek_video(self, frame_index: int):
+        if self.video_reader is None:
+            return
+        self.video_reader.set(cv2.CAP_PROP_POS_FRAMES, int(frame_index))
+        ok, frame = self.video_reader.read()
+        if not ok:
+            return
+        self._show_video_frame(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        seconds = frame_index / max(self.video_fps, 1.0)
+        duration = max(0, self.video_frame_count - 1) / max(self.video_fps, 1.0)
+        self.video_time_label.setText(f"Video : {seconds:.1f} / {duration:.1f} s")
+
+    def _toggle_video_playback(self):
+        if self.video_reader is None:
+            return
+        if self.video_timer.isActive():
+            self.video_timer.stop()
+            self.play_video_btn.setText("Lire video")
+            return
+        if self.video_slider.value() >= self.video_slider.maximum():
+            self.video_slider.setValue(0)
+        self.play_video_btn.setText("Pause")
+        self.video_timer.start(max(1, int(1000 / max(self.video_fps, 1.0))))
+
+    def _next_video_frame(self):
+        next_frame = self.video_slider.value() + 1
+        if next_frame > self.video_slider.maximum():
+            self.video_timer.stop()
+            self.play_video_btn.setText("Lire video")
+            return
+        self.video_slider.setValue(next_frame)
+        self._seek_video(next_frame)
+
     def measure_mvc(self, which: int):
         if self.recording:
             return
@@ -258,6 +409,7 @@ class EMGRealtimeWindow(QtWidgets.QMainWindow):
             self.sim.reset_record()
         self.record_btn.setText("Stop")
         self._lock_acquisition_controls(True)
+        self._start_video_capture()
         self.timer.start()
 
     def _tick(self):
@@ -278,12 +430,14 @@ class EMGRealtimeWindow(QtWidgets.QMainWindow):
                 values = 100 * values / self.mvc[index]
             self.raw_curves[index].setData(t, self.display_raw[:, index])
             self.env_curves[index].setData(t, values)
+        self._capture_video_frame()
 
     def stop_recording(self):
         self.timer.stop()
         self.recording = False
         self.record_btn.setText("Enregistrer")
         self._lock_acquisition_controls(False)
+        self._stop_video_capture()
         if not self.full_blocks:
             return
         raw = np.vstack(self.full_blocks)
@@ -333,6 +487,12 @@ class EMGRealtimeWindow(QtWidgets.QMainWindow):
         filename = time.strftime("emg_graphs_%Y%m%d_%H%M%S.png")
         self.centralWidget().grab().save(filename)
         self.quality_label.setText(f"PNG exporte : {filename}")
+
+    def closeEvent(self, event):
+        self.timer.stop()
+        self._stop_video_capture()
+        self._close_video_reader()
+        event.accept()
 
 
 def main():

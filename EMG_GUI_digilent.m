@@ -50,6 +50,12 @@ function EMG_GUI_digilent()
     setappdata(f,'sim_idx_record',1);  % record index
     setappdata(f,'sim_idx_mvc',1);     % MVC index (separate!)
     setappdata(f,'recBlinkOn',false);
+    setappdata(f,'video_camera',[]);
+    setappdata(f,'video_writer',[]);
+    setappdata(f,'video_file','');
+    setappdata(f,'video_frame_count',0);
+    setappdata(f,'video_fps',10);
+    setappdata(f,'video_playing',false);
 
     %% Build UI & connect
     buildUI();
@@ -101,15 +107,36 @@ function EMG_GUI_digilent()
         setappdata(f,'popupPair',popupPair);
 
         % Axes
-        ax_raw1  = axes(f,'Units','normalized','Position',[0.07,0.50,0.40,0.29]); hold(ax_raw1,'on');
-        ax_raw2  = axes(f,'Units','normalized','Position',[0.53,0.50,0.40,0.29]); hold(ax_raw2,'on');
-        ax_filt1 = axes(f,'Units','normalized','Position',[0.07,0.11,0.40,0.29]); hold(ax_filt1,'on');
-        ax_filt2 = axes(f,'Units','normalized','Position',[0.53,0.11,0.40,0.29]); hold(ax_filt2,'on');
+        ax_raw1  = axes(f,'Units','normalized','Position',[0.04,0.50,0.29,0.29]); hold(ax_raw1,'on');
+        ax_raw2  = axes(f,'Units','normalized','Position',[0.38,0.50,0.29,0.29]); hold(ax_raw2,'on');
+        ax_filt1 = axes(f,'Units','normalized','Position',[0.04,0.11,0.29,0.29]); hold(ax_filt1,'on');
+        ax_filt2 = axes(f,'Units','normalized','Position',[0.38,0.11,0.29,0.29]); hold(ax_filt2,'on');
 
         setappdata(f,'ax_raw1',ax_raw1);
         setappdata(f,'ax_raw2',ax_raw2);
         setappdata(f,'ax_filt1',ax_filt1);
         setappdata(f,'ax_filt2',ax_filt2);
+
+        ax_video = axes(f,'Units','normalized','Position',[0.72,0.45,0.25,0.30]);
+        axis(ax_video,'off');
+        title(ax_video,'Webcam');
+        setappdata(f,'ax_video',ax_video);
+        setappdata(f,'video_image',[]);
+
+        videoSlider = uicontrol(f,'Style','slider','Units','normalized', ...
+            'Position',[0.72,0.385,0.25,0.032],'Min',1,'Max',2,'Value',1, ...
+            'Enable','off','Callback',@(src,~) seekVideo(src));
+        setappdata(f,'videoSlider',videoSlider);
+
+        videoTxt = uicontrol(f,'Style','text','String','Video : aucune capture', ...
+            'Units','normalized','Position',[0.72,0.35,0.25,0.03], ...
+            'FontSize',10,'HorizontalAlignment','center');
+        setappdata(f,'videoTxt',videoTxt);
+
+        videoPlay = uicontrol(f,'Style','togglebutton','String','Lire video', ...
+            'Units','normalized','Position',[0.77,0.295,0.15,0.04], ...
+            'FontSize',11,'Enable','off','Callback',@(src,~) toggleVideoPlayback(src));
+        setappdata(f,'videoPlay',videoPlay);
 
         % Buttons (top row)
         btnTest = uicontrol(f,'Style','togglebutton','String','TEST', ...
@@ -276,6 +303,148 @@ function EMG_GUI_digilent()
             set(recTxt,'String','REC');
         end
         setappdata(f,'recBlinkOn',~blink);
+    end
+
+    function showVideoFrame(frame)
+        axVideo = getappdata(f,'ax_video');
+        hImage = getappdata(f,'video_image');
+        if isempty(hImage) || ~isvalid(hImage)
+            axes(axVideo); %#ok<LAXES>
+            hImage = image(axVideo, frame);
+            axis(axVideo,'image');
+            axis(axVideo,'off');
+            title(axVideo,'Webcam');
+            setappdata(f,'video_image',hImage);
+        else
+            set(hImage,'CData',frame);
+        end
+    end
+
+    function startVideoCapture()
+        stopVideoPlayback();
+        setappdata(f,'video_file','');
+        setappdata(f,'video_frame_count',0);
+        videoSlider = getappdata(f,'videoSlider');
+        videoPlay = getappdata(f,'videoPlay');
+        set(videoSlider,'Enable','off','Value',1);
+        set(videoPlay,'Enable','off','Value',0,'String','Lire video');
+        cam = [];
+        writer = [];
+        try
+            cam = webcam;
+            frame = snapshot(cam);
+            filename = ['emg_video_' datestr(now,'yyyymmdd_HHMMSS') '.mp4'];
+            writer = VideoWriter(filename,'MPEG-4');
+            writer.FrameRate = getappdata(f,'video_fps');
+            open(writer);
+            writeVideo(writer,frame);
+            setappdata(f,'video_camera',cam);
+            setappdata(f,'video_writer',writer);
+            setappdata(f,'video_file',filename);
+            setappdata(f,'video_frame_count',1);
+            set(getappdata(f,'videoTxt'),'String','Video : enregistrement webcam en cours');
+            showVideoFrame(frame);
+        catch ME
+            if ~isempty(writer), try close(writer); catch, end, end
+            clear cam
+            setappdata(f,'video_camera',[]);
+            setappdata(f,'video_writer',[]);
+            setStatus('EMG actif; webcam indisponible (support package requis).', [0.75 0.35 0]);
+            disp(getReport(ME,'extended'));
+        end
+    end
+
+    function captureVideoFrame()
+        cam = getappdata(f,'video_camera');
+        writer = getappdata(f,'video_writer');
+        if isempty(cam) || isempty(writer), return, end
+        try
+            frame = snapshot(cam);
+            writeVideo(writer,frame);
+            setappdata(f,'video_frame_count',getappdata(f,'video_frame_count') + 1);
+            showVideoFrame(frame);
+        catch ME
+            setStatus('Capture webcam interrompue; acquisition EMG maintenue.', [0.75 0.35 0]);
+            disp(getReport(ME,'extended'));
+        end
+    end
+
+    function stopVideoCapture()
+        writer = getappdata(f,'video_writer');
+        if ~isempty(writer)
+            try close(writer); catch, end
+        end
+        setappdata(f,'video_writer',[]);
+        setappdata(f,'video_camera',[]);
+        filename = getappdata(f,'video_file');
+        if isempty(filename) || ~isfile(filename), return, end
+        try
+            reader = VideoReader(filename);
+            frameCount = max(1,floor(reader.Duration * reader.FrameRate));
+            setappdata(f,'video_frame_count',frameCount);
+            setappdata(f,'video_fps',reader.FrameRate);
+            slider = getappdata(f,'videoSlider');
+            step = 1 / max(frameCount - 1, 1);
+            set(slider,'Min',1,'Max',max(2,frameCount),'Value',1, ...
+                'SliderStep',[step min(1,10*step)],'Enable','on');
+            set(getappdata(f,'videoPlay'),'Enable','on','Value',0,'String','Lire video');
+            seekVideo(slider);
+        catch ME
+            set(getappdata(f,'videoTxt'),'String','Video : fichier illisible');
+            disp(getReport(ME,'extended'));
+        end
+    end
+
+    function seekVideo(slider)
+        filename = getappdata(f,'video_file');
+        if isempty(filename) || ~isfile(filename), return, end
+        reader = VideoReader(filename);
+        frameIndex = round(get(slider,'Value'));
+        frameIndex = min(frameIndex, max(1,getappdata(f,'video_frame_count')));
+        reader.CurrentTime = min((frameIndex-1) / max(reader.FrameRate,1), ...
+            max(0, reader.Duration - 1/max(reader.FrameRate,1)));
+        if hasFrame(reader)
+            showVideoFrame(readFrame(reader));
+        end
+        duration = max(0, reader.Duration);
+        currentTime = (frameIndex-1) / max(reader.FrameRate,1);
+        set(getappdata(f,'videoTxt'),'String', ...
+            sprintf('Video : %.1f / %.1f s',currentTime,duration));
+    end
+
+    function toggleVideoPlayback(src)
+        if src.Value == 0
+            set(src,'String','Lire video');
+            setappdata(f,'video_playing',false);
+            return
+        end
+        set(src,'String','Pause');
+        setappdata(f,'video_playing',true);
+        slider = getappdata(f,'videoSlider');
+        fps = max(getappdata(f,'video_fps'),1);
+        while ishandle(f) && getappdata(f,'video_playing') && src.Value == 1
+            nextFrame = round(get(slider,'Value')) + 1;
+            if nextFrame > get(slider,'Max')
+                src.Value = 0;
+                break
+            end
+            set(slider,'Value',nextFrame);
+            seekVideo(slider);
+            drawnow;
+            pause(1/fps);
+        end
+        if ishandle(src)
+            set(src,'String','Lire video','Value',0);
+        end
+        setappdata(f,'video_playing',false);
+    end
+
+    function stopVideoPlayback()
+        setappdata(f,'video_playing',false);
+        videoPlay = getappdata(f,'videoPlay');
+        if ~isempty(videoPlay) && isvalid(videoPlay)
+            set(videoPlay,'Value',0,'String','Lire video');
+        end
     end
 
     % ============================
@@ -456,12 +625,14 @@ function EMG_GUI_digilent()
 
             resetAllAxes('recording');
             setUIState('recording');
+            startVideoCapture();
 
             try
                 streamRecording();
             catch ME
                 setappdata(f,'isRecording',false);
                 setUIState('idle');
+                stopVideoCapture();
                 setStatus('Erreur pendant acquisition. Voir console.', 'red');
                 disp(getReport(ME,'extended'));
             end
@@ -478,6 +649,7 @@ function EMG_GUI_digilent()
             % STOP
             setappdata(f,'isRecording',false);
             setUIState('idle');
+            stopVideoCapture();
 
             rawBuf = getappdata(f,'rawBuf');
             rawBuf = rawBuf(1:getappdata(f,'sampleIdx'),:);
@@ -548,6 +720,7 @@ function EMG_GUI_digilent()
             if ~isempty(hf1) && isvalid(hf1), set(hf1,'XData',tsec,'YData',filt1,'Color',color_emg1); end
             if ~isempty(hf2) && isvalid(hf2), set(hf2,'XData',tsec,'YData',filt2,'Color',color_emg2); end
 
+            captureVideoFrame();
             blinkREC();
             drawnow limitrate;
 
@@ -817,6 +990,8 @@ function EMG_GUI_digilent()
     % ============================
     function onClose(~,~)
         setappdata(f,'isRecording',false);
+        try stopVideoPlayback(); catch, end
+        try stopVideoCapture(); catch, end
         try setUIState('idle'); catch, end
         delete(f);
     end

@@ -36,21 +36,25 @@ Deux frontends partagent le même traitement et le même accès MCC :
 - mesure MVC séparée pour chaque canal pendant `5 s`;
 - rejet de 60 Hz, passe-bande `20-400 Hz` et enveloppe RMS normalisée par MVC;
 - alertes de saturation, bruit secteur, signal faible et MVC insuffisante;
+- capture webcam synchronisée à l'enregistrement EMG et relecture avec
+  curseur temporel;
 - affichage en direct par canal, puis superposition des deux courbes après
   l'arrêt de l'enregistrement;
 - export de la figure en PNG et du dernier enregistrement en CSV.
 
 `EMG_GUI_diligent.py` conserve une interface Matplotlib simple. Pour les
 séances temps réel, `EMG_GUI_pyqtgraph.py` fournit une interface Qt/PyQtGraph
-avec commandes plus grandes et rendu graphique plus fluide.
+avec commandes plus grandes, rendu graphique plus fluide et lecteur vidéo
+intégré à droite des courbes.
 
 ### Version MATLAB
 
 `EMG_GUI_digilent.m` fournit une autre interface avec mode simulation,
 acquisition MCC via l'assemblage `.NET` `MccDaq`, export et traitement
 incluant un rejet de 60 Hz, un passe-bande `20-400 Hz` et une enveloppe RMS.
-Elle demande une installation MATLAB et MCC compatible sur le poste de
-laboratoire.
+Elle capture également la webcam lors d'un enregistrement et permet de
+relire la vidéo avec une barre de défilement. Elle demande une installation
+MATLAB et MCC compatible sur le poste de laboratoire.
 
 ## Ce que l'on observe
 
@@ -117,6 +121,20 @@ et EMG2. Il est volontairement simple afin de servir à l'explication en
 classe. Dans l'implémentation actuelle, il contient `5 s` de données
 d'enregistrement; une acquisition simulée plus longue produit ensuite des
 zéros.
+
+### Capture vidéo
+
+Lorsque l'étudiant clique sur `Enregistrer`, l'application démarre aussi une
+capture webcam. Après `Stop`, le panneau vidéo permet de déplacer le curseur
+dans l'essai ou de lancer la lecture. Si aucune webcam n'est accessible,
+l'enregistrement EMG continue sans vidéo et un message l'indique.
+
+- Python : la capture utilise `opencv`, inclus dans `environment.yml`.
+- MATLAB : la capture utilise `webcam` et nécessite le support package
+  **MATLAB Support Package for USB Webcams**.
+- La capture vidéo est destinée à observer le mouvement; elle n'est pas
+  synchronisée au niveau image/échantillon pour une analyse biomécanique
+  précise.
 
 ## Utilisation avec une carte MCC
 
@@ -188,6 +206,7 @@ lequel le programme a été lancé :
 
 - `emg_graphs_YYYYMMDD_HHMMSS.png` : capture des graphiques affichés;
 - `emg_last_YYYYMMDD_HHMMSS.csv` : dernier enregistrement arrêté.
+- `emg_video_YYYYMMDD_HHMMSS.mp4` : vidéo webcam enregistrée pendant l'essai.
 
 Le CSV contient les colonnes suivantes :
 
@@ -220,6 +239,8 @@ Le CSV contient les colonnes suivantes :
 - La simulation Python est limitée à un essai de 5 secondes.
 - Les exports Python ne sauvegardent pas encore les métadonnées d'une séance
   (muscles, participant, placement, condition et valeurs MVC).
+- La synchronisation vidéo est approximative et adaptée à la rétroaction
+  pédagogique, pas à une mesure cinématique image par image.
 - Les scripts `test_*.py` interrogent le matériel directement et ne sont pas
   des tests automatisés exécutables sans carte MCC.
 
