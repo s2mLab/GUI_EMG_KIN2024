@@ -306,7 +306,7 @@ function EMG_GUI_digilent()
             [err2, raw2] = mcc_board.AIn(int32(ch2), mcc_range);
         
             if int32(err1.Value)~=0 || int32(err2.Value)~=0
-                error('Erreur AIn: err1=%d err2=%d', int32(err1.Value), int32(err2.Value));
+                error(formatMccError('AIn', err1, err2));
             end
         
             % juste pour valider conversion possible
@@ -315,10 +315,27 @@ function EMG_GUI_digilent()
         
             setStatus(sprintf('MCC détectée (.NET) | paire AI%d-%d',ch1,ch2), 'green');
         catch ME
-            setStatus('MccDaq introuvable. Installez UL .NET ou activez TEST.', 'red');
+            if contains(ME.message, 'CB.CFG') || contains(ME.message, '126')
+                setStatus('CB.CFG absent : ouvrez InstaCal et configurez la carte 0.', 'red');
+            else
+                setStatus('Erreur MCC (.NET). Consultez la console ou activez TEST.', 'red');
+            end
             disp(getReport(ME,'extended'));
         end
 
+    end
+
+    function msg = formatMccError(operation, err1, err2)
+        value1 = int32(err1.Value);
+        value2 = int32(err2.Value);
+        details = sprintf('%s: err1=%d (%s) err2=%d (%s).', operation, ...
+            value1, char(err1.Message), value2, char(err2.Message));
+        if value1 == 126 || value2 == 126
+            msg = [details ' Fichier CB.CFG introuvable. Lancez InstaCal, ' ...
+                'ajoutez la carte MCC et assignez-la au numero 0.'];
+        else
+            msg = details;
+        end
     end
 
     function toggleTestMode(src)
@@ -365,10 +382,13 @@ function EMG_GUI_digilent()
         block = zeros(nPts,2);
         t0 = tic;
         for k = 1:nPts
-            [~, raw1] = board.AIn(int32(ch1), range);
+            [err1, raw1] = board.AIn(int32(ch1), range);
+            [err2, raw2] = board.AIn(int32(ch2), range);
+            if int32(err1.Value)~=0 || int32(err2.Value)~=0
+                error(formatMccError('AIn', err1, err2));
+            end
+
             [~, v1]   = board.ToEngUnits(range, raw1);
-    
-            [~, raw2] = board.AIn(int32(ch2), range);
             [~, v2]   = board.ToEngUnits(range, raw2);
     
             block(k,:) = [double(v1), double(v2)];
@@ -393,7 +413,12 @@ function EMG_GUI_digilent()
         err = board.AInScan(int32(ch1), int32(ch2), count, rate, range, ...
             memHandle, MccDaq.ScanOptions.ScaleData);
         if int32(err.Value) ~= 0
-            error('Erreur MCC AInScan: err=%d', int32(err.Value));
+            if int32(err.Value) == 126
+                error(['AInScan: err=126 (%s). Fichier CB.CFG introuvable. ' ...
+                    'Lancez InstaCal, ajoutez la carte MCC et assignez-la au numero 0.'], ...
+                    char(err.Message));
+            end
+            error('Erreur MCC AInScan: err=%d (%s)', int32(err.Value), char(err.Message));
         end
         values = NET.createArray('System.Double', double(count));
         err = MccDaq.MccService.ScaledWinBufToArray(memHandle, values, int32(0), count);

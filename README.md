@@ -164,6 +164,23 @@ Sur le poste d'acquisition :
 4. Si la DLL est installée dans un autre dossier, définir son répertoire avec
    `setenv('MCCDAQ_DIR', 'C:\chemin\vers\DAQ')`, puis relancer la commande.
 
+### Dépannage MATLAB : erreur `AIn 126`
+
+L'erreur `AIn: err=126` indique que la DLL MCC est chargée, mais que Universal
+Library ne trouve pas le fichier de configuration `CB.CFG`. Ce fichier est
+créé ou mis à jour par InstaCal et contient notamment l'association entre la
+carte connectée et son numéro de carte (`0` dans cette application).
+
+1. Fermer MATLAB.
+2. Brancher la carte MCC.
+3. Ouvrir InstaCal et vérifier que la carte est détectée.
+4. Ajouter/configurer la carte comme `Board Number 0`, puis quitter InstaCal.
+5. Relancer MATLAB et exécuter `test_api`, puis l'interface.
+
+Si l'erreur persiste, vérifier que l'installation MCC utilisée par MATLAB est
+la même que celle qui a installé et lancé InstaCal, et rechercher `CB.CFG`
+dans le dossier d'installation Measurement Computing.
+
 ## Export des résultats
 
 Dans l'application Python, les fichiers sont écrits dans le dossier depuis
