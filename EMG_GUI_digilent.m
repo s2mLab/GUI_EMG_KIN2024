@@ -49,6 +49,12 @@ function f = EMG_GUI_digilent()
     setappdata(f,'test_mode',false);
     setappdata(f,'guided_mode',true);
     setappdata(f,'hardware_scan_enabled',true);
+    setappdata(f,'mcc_continuous_active',false);
+    setappdata(f,'mcc_continuous_handle',[]);
+    setappdata(f,'mcc_continuous_count',0);
+    setappdata(f,'mcc_continuous_read_index',0);
+    setappdata(f,'mcc_continuous_overrun',false);
+    setappdata(f,'analog_capture_start_time',0);
     setappdata(f,'isRecording',false);
     setappdata(f,'isPreparing',false);
     setappdata(f,'notch_enabled',true);
@@ -1049,6 +1055,119 @@ function f = EMG_GUI_digilent()
         clear cleanup
     end
 
+    function started = startContinuousAnalogScan()
+        started = false;
+        stopContinuousAnalogScan();
+        if getappdata(f,'test_mode') || ~getappdata(f,'hardware_scan_enabled')
+            return
+        end
+        board = getappdata(f,'mcc_board');
+        range = getappdata(f,'mcc_range');
+        ch1 = getappdata(f,'chanNum1');
+        ch2 = getappdata(f,'chanNum2');
+        if isempty(board) || isempty(range), return, end
+
+        % A long circular buffer allows GUI/video work to fall behind briefly
+        % without interrupting analog sampling performed by Universal Library.
+        bufferSeconds = 60;
+        count = int32(Fs * 2 * bufferSeconds);
+        memHandle = MccDaq.MccService.ScaledWinBufAllocEx(count);
+        if memHandle.ToInt64() == int64(0)
+            setStatus('Buffer continu MCC indisponible : scan par blocs utilise.', [0.75 0.35 0]);
+            return
+        end
+        try
+            rate = int32(Fs);
+            options = bitor(bitor(MccDaq.ScanOptions.ScaleData, ...
+                MccDaq.ScanOptions.Background), MccDaq.ScanOptions.Continuous);
+            analogStart = toc(getappdata(f,'video_trigger_clock'));
+            err = board.AInScan(int32(ch1), int32(ch2), count, rate, range, ...
+                memHandle, options);
+            if int32(err.Value) ~= 0
+                error('AInScan continu: err=%d (%s)',int32(err.Value),char(err.Message));
+            end
+            setappdata(f,'mcc_continuous_handle',memHandle);
+            setappdata(f,'mcc_continuous_count',double(count));
+            setappdata(f,'mcc_continuous_read_index',0);
+            setappdata(f,'mcc_continuous_active',true);
+            setappdata(f,'mcc_continuous_overrun',false);
+            setappdata(f,'analog_capture_start_time',analogStart);
+            started = true;
+            setStatus('Acquisition MCC continue : buffer analogique actif.', [0 0.45 0.20]);
+        catch ME
+            try board.StopBackground(MccDaq.FunctionType.AiFunction); catch, end
+            try MccDaq.MccService.WinBufFreeEx(memHandle); catch, end
+            setappdata(f,'mcc_continuous_handle',[]);
+            setappdata(f,'mcc_continuous_active',false);
+            setStatus('Scan continu MCC indisponible : scan par blocs utilise.', [0.75 0.35 0]);
+            disp(getReport(ME,'extended'));
+        end
+    end
+
+    function block = readContinuousAnalogBlock(nPts)
+        board = getappdata(f,'mcc_board');
+        memHandle = getappdata(f,'mcc_continuous_handle');
+        count = getappdata(f,'mcc_continuous_count');
+        required = double(nPts * 2);
+        readIndex = getappdata(f,'mcc_continuous_read_index');
+        waitStart = tic;
+        available = 0;
+        while getappdata(f,'isRecording') && ishandle(f)
+            [err, ~, ~, currentIndex] = board.GetStatus(MccDaq.FunctionType.AiFunction);
+            if int32(err.Value) ~= 0
+                error('GetStatus MCC: err=%d (%s)',int32(err.Value),char(err.Message));
+            end
+            writeIndex = mod(double(currentIndex) + 1, count);
+            available = mod(writeIndex - readIndex, count);
+            if available >= required
+                break
+            end
+            drawnow limitrate;
+            pause(0.002);
+            if toc(waitStart) > 2
+                error('Timeout en attente de donnees du buffer continu MCC.');
+            end
+        end
+        if ~getappdata(f,'isRecording') || available < required
+            block = zeros(0,2);
+            return
+        end
+
+        firstCount = min(required,count-readIndex);
+        values = NET.createArray('System.Double',required);
+        err = MccDaq.MccService.ScaledWinBufToArray(memHandle,values, ...
+            int32(readIndex),int32(firstCount));
+        if int32(err.Value) ~= 0
+            error('Lecture buffer continu MCC: err=%d',int32(err.Value));
+        end
+        if firstCount < required
+            tail = NET.createArray('System.Double',required-firstCount);
+            err = MccDaq.MccService.ScaledWinBufToArray(memHandle,tail, ...
+                int32(0),int32(required-firstCount));
+            if int32(err.Value) ~= 0
+                error('Lecture buffer continu MCC (retour): err=%d',int32(err.Value));
+            end
+            for k = 1:(required-firstCount)
+                values(firstCount+k) = tail(k);
+            end
+        end
+        setappdata(f,'mcc_continuous_read_index',mod(readIndex+required,count));
+        block = reshape(double(values),2,nPts)';
+    end
+
+    function stopContinuousAnalogScan()
+        if ~getappdata(f,'mcc_continuous_active')
+            return
+        end
+        board = getappdata(f,'mcc_board');
+        memHandle = getappdata(f,'mcc_continuous_handle');
+        try board.StopBackground(MccDaq.FunctionType.AiFunction); catch, end
+        try MccDaq.MccService.WinBufFreeEx(memHandle); catch, end
+        setappdata(f,'mcc_continuous_active',false);
+        setappdata(f,'mcc_continuous_handle',[]);
+        setappdata(f,'mcc_continuous_count',0);
+    end
+
 
 
     % ============================
@@ -1092,12 +1211,16 @@ function f = EMG_GUI_digilent()
             resetAllAxes('recording');
             setUIState('recording');
             startTriggeredVideoCapture(hasVideo);
+            if ~test_mode
+                startContinuousAnalogScan();
+            end
 
             try
                 streamRecording();
             catch ME
                 setappdata(f,'isRecording',false);
                 setUIState('idle');
+                stopContinuousAnalogScan();
                 stopVideoCapture();
                 setStatus('Erreur pendant acquisition. Voir console.', 'red');
                 disp(getReport(ME,'extended'));
@@ -1119,6 +1242,7 @@ function f = EMG_GUI_digilent()
             end
             setappdata(f,'isRecording',false);
             setUIState('idle');
+            stopContinuousAnalogScan();
             stopVideoCapture();
 
             rawBuf = getappdata(f,'rawBuf');
@@ -1155,11 +1279,19 @@ function f = EMG_GUI_digilent()
 
             triggerClock = getappdata(f,'video_trigger_clock');
             blockStart = toc(triggerClock);
-            updateAcquisitionTiming(blockStart,chunkSec);
+            if ~getappdata(f,'mcc_continuous_active')
+                updateAcquisitionTiming(blockStart,chunkSec);
+            end
             block = acquireBlockUnified('record', chunkPts); % Nx2
+            if isempty(block), break, end
             captureVideoFrame();
             N = size(block,1);
-            blockTimes = blockStart + (0:N-1)'/Fs;
+            if getappdata(f,'mcc_continuous_active')
+                blockTimes = getappdata(f,'analog_capture_start_time') + ...
+                    (sampleIdx + (0:N-1)')/Fs;
+            else
+                blockTimes = blockStart + (0:N-1)'/Fs;
+            end
             neededPts = sampleIdx + N;
             if neededPts > size(rawBuf,1)
                 rawBuf = [rawBuf; zeros(Fs*60,2)]; %#ok<AGROW>
@@ -1552,6 +1684,10 @@ function f = EMG_GUI_digilent()
             ch1 = getappdata(f,'chanNum1');
             ch2 = getappdata(f,'chanNum2');
         
+            if strcmp(kind,'record') && getappdata(f,'mcc_continuous_active')
+                block = readContinuousAnalogBlock(nPts);
+                return
+            end
             if getappdata(f,'hardware_scan_enabled')
                 try
                     block = mccReadBlockScan(mcc_board, mcc_range, ch1, ch2, nPts, Fs);
@@ -1572,6 +1708,7 @@ function f = EMG_GUI_digilent()
     function onClose(~,~)
         setappdata(f,'isRecording',false);
         try stopVideoPlayback(); catch, end
+        try stopContinuousAnalogScan(); catch, end
         try stopVideoCapture(); catch, end
         try setUIState('idle'); catch, end
         delete(f);

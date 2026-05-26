@@ -375,10 +375,13 @@ Le CSV contient les colonnes suivantes :
 - La version MATLAB horodate les images et les blocs EMG à partir d'un départ
   logiciel commun; une synchronisation matérielle reste nécessaire pour une
   mesure cinématique image par image.
-- L'acquisition analogique MATLAB utilise actuellement des scans successifs,
-  pas un buffer continu en arriere-plan. L'interface signale un retard de
-  bloc superieur a `20 ms`; pour reduire ce risque, utiliser `winvideo` ou
-  enregistrer sans video de repli `webcam`.
+- En mode materiel, l'acquisition analogique MATLAB tente maintenant
+  `AInScan` avec `Background + Continuous` et un buffer circulaire de `60 s`.
+  L'echantillonnage MCC se poursuit ainsi pendant le rafraichissement ou la
+  capture video. Si le pilote refuse ce mode, l'interface annonce le repli
+  vers des scans successifs, mode qui peut encore presenter des trous.
+- En repli par scans successifs, l'interface signale un retard de bloc
+  superieur a `20 ms`; utiliser le mode continu et `winvideo` est recommande.
 - Les scripts `test_*.py` interrogent le matériel directement et ne sont pas
   des tests automatisés exécutables sans carte MCC.
 

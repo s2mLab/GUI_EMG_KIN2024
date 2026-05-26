@@ -82,6 +82,14 @@ function testSimulationModeDefaultsOffAndIsAtBottomLeft(testCase)
     testCase.verifyLessThan(testCheck.Position(2),0.10);
 end
 
+function testContinuousAnalogBufferStartsIdle(testCase)
+    f = testCase.TestData.figure;
+
+    testCase.verifyFalse(getappdata(f,'mcc_continuous_active'));
+    testCase.verifyEmpty(getappdata(f,'mcc_continuous_handle'));
+    testCase.verifyEqual(getappdata(f,'mcc_continuous_count'),0);
+end
+
 function testPlacementPreviewCanBeDisabled(testCase)
     f = testCase.TestData.figure;
     previewCheck = findobj(f,'Tag','previewCheck');
