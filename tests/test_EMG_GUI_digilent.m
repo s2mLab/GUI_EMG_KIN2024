@@ -90,6 +90,21 @@ function testContinuousAnalogBufferStartsIdle(testCase)
     testCase.verifyEqual(getappdata(f,'mcc_continuous_count'),0);
 end
 
+function testMvcDynamicScaleTracksSmallSignals(testCase)
+    f = testCase.TestData.figure;
+    hooks = getappdata(f,'testHooks');
+    axRaw = findobj(f,'Tag','ax_raw1');
+    axEnvelope = findobj(f,'Tag','ax_filt1');
+
+    hooks.fitLiveYLimits(axRaw,[-0.012 0.021]);
+    hooks.fitLiveYLimits(axEnvelope,[0.0010 0.0012]);
+
+    testCase.verifyLessThan(diff(axRaw.YLim),0.05, ...
+        'La MVC brute doit adapter son echelle a une faible amplitude.');
+    testCase.verifyLessThan(diff(axEnvelope.YLim),0.001, ...
+        'L''enveloppe MVC doit rester lisible pour une faible amplitude.');
+end
+
 function testPlacementPreviewCanBeDisabled(testCase)
     f = testCase.TestData.figure;
     previewCheck = findobj(f,'Tag','previewCheck');

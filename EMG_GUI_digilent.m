@@ -104,6 +104,7 @@ function f = EMG_GUI_digilent()
         'dependencyReport',@buildDependencyReport, ...
         'setSliderToTime',@setSliderToTime, ...
         'synchronizeVideoFrameTimes',@synchronizeVideoFrameTimes, ...
+        'fitLiveYLimits',@fitLiveYLimits, ...
         'resetAllAxes',@resetAllAxes, ...
         'updateAcquisitionTiming',@updateAcquisitionTiming));
     connectDAQ();
@@ -1612,6 +1613,8 @@ function f = EMG_GUI_digilent()
 
                 env = filterEMG(buf, Fs, getappdata(f,'notch_enabled'));
                 set(hFilt,'XData',tsec,'YData',env);
+                fitLiveYLimits(targetRaw,buf);
+                fitLiveYLimits(targetFilt,env);
 
                 drawnow limitrate;
 
@@ -1839,9 +1842,9 @@ function fitLiveYLimits(ax,data)
     high = max(data);
     span = high-low;
     if span <= eps
-        span = max(abs(low),1) * 0.2;
+        span = max([abs(low), abs(high), 1e-6]) * 0.2;
     end
-    padding = max(0.05*span,eps);
+    padding = max(0.05*span,1e-9);
     set(ax,'YLim',[low-padding high+padding]);
 end
 
