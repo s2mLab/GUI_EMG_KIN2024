@@ -3,3 +3,4 @@ __pycache__/
 emg_graphs_*.png
 emg_last_*.csv
 emg_video_*.mp4
+emg_video_*.avi

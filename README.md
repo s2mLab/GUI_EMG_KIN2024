@@ -52,9 +52,106 @@ intégré à droite des courbes.
 `EMG_GUI_digilent.m` fournit une autre interface avec mode simulation,
 acquisition MCC via l'assemblage `.NET` `MccDaq`, export et traitement
 incluant un rejet de 60 Hz, un passe-bande `20-400 Hz` et une enveloppe RMS.
-Elle capture également la webcam lors d'un enregistrement et permet de
-relire la vidéo avec une barre de défilement. Elle demande une installation
-MATLAB et MCC compatible sur le poste de laboratoire.
+Elle demarre en mode materiel; la case `Mode TEST (simulation)` en bas a
+gauche permet d'activer explicitement les signaux simules.
+Le bouton `Bilan installations` evalue au demarrage les composants disponibles
+et indique les toolboxes, support packages ou pilotes MCC a installer.
+Elle propose un positionnement webcam de `5 s`, puis déclenche ensemble la
+vidéo et l'EMG. La relecture est liée aux graphiques par un curseur temporel
+et un panneau compare le contenu fréquentiel des deux signaux. Un checkbox
+permet d'activer ou désactiver les notch filters de `60 Hz` et de ses
+harmoniques (`120` à `360 Hz`).
+
+## Installation MATLAB sur Windows
+
+### Mode TEST sans matériel
+
+Le mode `TEST` peut être utilisé sans carte MCC et sans webcam. Installer :
+
+1. MATLAB;
+2. **Signal Processing Toolbox**, utilisé pour le filtrage EMG et l'analyse
+   fréquentielle (`butter`, `filtfilt`, `pwelch`).
+
+Dans MATLAB, placer le dossier du projet dans le chemin courant, puis lancer :
+
+```matlab
+EMG_GUI_digilent
+```
+
+L'interface tente par defaut de se connecter a la carte MCC. Pour travailler
+sans materiel, cocher `Mode TEST (simulation)` en bas a gauche apres
+l'ouverture; les acquisitions suivantes utilisent alors les signaux simules.
+
+### Webcam facultative
+
+Pour activer le positionnement et l'enregistrement vidéo, installer
+**MATLAB Support Package for USB Webcams** :
+
+1. Dans MATLAB, ouvrir `Home > Add-Ons > Get Hardware Support Packages`.
+2. Choisir `MATLAB Support Package for USB Webcams` dans la catégorie
+   caméras/imagerie et terminer l'installation.
+3. Autoriser l'accès de MATLAB à la caméra dans les paramètres de
+   confidentialité Windows si nécessaire.
+4. Vérifier l'installation dans MATLAB :
+
+```matlab
+webcamlist
+cam = webcam;
+snapshot(cam);
+clear cam
+```
+
+Documentation officielle :
+[MathWorks - Install the MATLAB Support Package for USB Webcams](https://www.mathworks.com/help/imaq/install-the-matlab-support-package-for-usb-webcams.html).
+
+### Vidéo parallèle à l'acquisition EMG
+
+La fonction `webcam` seule fournit des images par appels `snapshot`; elle ne
+permet pas à cette interface de journaliser la vidéo indépendamment de la
+boucle analogique. Pour enregistrer la vidéo en parallèle de l'acquisition
+MCC, installer également :
+
+1. **Image Acquisition Toolbox**;
+2. **Image Acquisition Toolbox Support Package for OS Generic Video
+   Interface**, qui fournit l'adaptateur Windows `winvideo`.
+
+Après installation, vérifier dans MATLAB :
+
+```matlab
+info = imaqhwinfo;
+assert(any(strcmpi(info.InstalledAdaptors,'winvideo')))
+```
+
+Lorsque `winvideo` est disponible, l'interface choisit automatiquement
+`videoinput` avec un `DiskLogger`: la caméra écrit la vidéo sur disque en
+arrière-plan pendant que la boucle MCC collecte le signal analogique. Sans cet
+adaptateur, la capture `webcam` reste disponible en repli horodaté.
+
+Documentation officielle :
+[MathWorks - Installer les adaptateurs Image Acquisition Toolbox](https://www.mathworks.com/help/imaq/installing-the-support-packages-for-image-acquisition-toolbox-adaptors.html)
+et
+[MathWorks - Logging Image Data to Disk](https://www.mathworks.com/help/imaq/logging-image-data-to-disk.html).
+
+### Carte MCC USB-1208FS-PLUS
+
+L'acquisition matérielle MATLAB utilise l'assembly `.NET` `MccDaq`. Sur le
+poste Windows d'acquisition :
+
+1. Installer **Universal Library for Windows** de Digilent/MCC, avec les
+   composants `.NET`, ainsi que **InstaCal**.
+2. Brancher la carte, ouvrir InstaCal, détecter ou ajouter la carte, puis
+   l'affecter au numéro `0` (`Board Number 0`).
+3. Relancer MATLAB et vérifier la DLL puis l'accès analogique :
+
+```matlab
+load_mccdaq_assembly
+test_api
+```
+
+Téléchargement et instructions officiels :
+[Digilent - Universal Library](https://digilent.com/shop/universal-library/)
+et
+[Digilent/MCC - Getting Started](https://files.digilent.com/manuals/Mcculw_WebHelp/Users_Guide/Overview/GetStarted.htm).
 
 ## Ce que l'on observe
 
@@ -73,6 +170,22 @@ Dans les deux versions, la courbe d'enveloppe est calculée après rejet de
 `60 Hz` et passe-bande EMG `20-400 Hz`, puis lissée par RMS sur `100 ms`.
 L'axe reste en volts avant une MVC valide et passe en `%MVC` uniquement après
 calibration du canal.
+
+Dans l'application MATLAB, le menu `Affichage` propose deux lectures :
+
+- `EMG1 + EMG2` conserve la comparaison des deux signaux;
+- `Brut + filtre` superpose, pour chaque canal, le signal brut transparent et
+  le signal passe-bande/notch filtre en volts. Dans ce mode, l'analyse
+  frequentielle affiche egalement les spectres filtres des deux canaux.
+
+La ligne `Qualite` associe les problemes detectes a une action pratique :
+saturation -> reduire l'amplification ou le gain; signal faible -> verifier
+les electrodes et les cables; bruit `60 Hz` -> verifier la masse et
+l'alimentation; MVC faible -> recommencer la contraction maximale.
+
+Le bouton `Bilan installations` rappelle les prerequis absents pour
+l'acquisition analogique (`MccDaq` / InstaCal), la webcam, la video parallele
+`winvideo` et le traitement frequentiel.
 
 ## Démarrage rapide en mode TEST
 
@@ -124,17 +237,22 @@ zéros.
 
 ### Capture vidéo
 
-Lorsque l'étudiant clique sur `Enregistrer`, l'application démarre aussi une
-capture webcam. Après `Stop`, le panneau vidéo permet de déplacer le curseur
-dans l'essai ou de lancer la lecture. Si aucune webcam n'est accessible,
-l'enregistrement EMG continue sans vidéo et un message l'indique.
+Dans l'application MATLAB, le clic sur `Enregistrer` affiche d'abord la caméra
+pendant `5 s` pour permettre le placement. À la fin du compte à rebours,
+l'EMG et la vidéo sont déclenchés depuis une horloge commune. La vidéo n'est
+pas redessinée pendant l'acquisition afin de préserver les ressources. Après
+`Stop`, le curseur vertical des graphiques et le lecteur vidéo utilisent les
+horodatages capturés. Si aucune webcam n'est accessible, l'enregistrement EMG
+continue sans vidéo et un message l'indique.
 
 - Python : la capture utilise `opencv`, inclus dans `environment.yml`.
 - MATLAB : la capture utilise `webcam` et nécessite le support package
   **MATLAB Support Package for USB Webcams**.
-- La capture vidéo est destinée à observer le mouvement; elle n'est pas
-  synchronisée au niveau image/échantillon pour une analyse biomécanique
-  précise.
+- MATLAB : l'acquisition vidéo réellement indépendante de la boucle EMG
+  nécessite `Image Acquisition Toolbox` et l'adaptateur `winvideo`.
+- La synchronisation MATLAB repose sur les horodatages logiciels de capture;
+  elle améliore fortement l'alignement pédagogique, mais ne remplace pas un
+  déclencheur matériel pour une analyse biomécanique de précision.
 
 ## Utilisation avec une carte MCC
 
@@ -206,7 +324,8 @@ lequel le programme a été lancé :
 
 - `emg_graphs_YYYYMMDD_HHMMSS.png` : capture des graphiques affichés;
 - `emg_last_YYYYMMDD_HHMMSS.csv` : dernier enregistrement arrêté.
-- `emg_video_YYYYMMDD_HHMMSS.mp4` : vidéo webcam enregistrée pendant l'essai.
+- `emg_video_YYYYMMDD_HHMMSS.mp4` : vidéo enregistrée avec le mode webcam.
+- `emg_video_YYYYMMDD_HHMMSS.avi` : vidéo enregistrée en parallèle avec `winvideo`.
 
 Le CSV contient les colonnes suivantes :
 
@@ -229,6 +348,7 @@ Le CSV contient les colonnes suivantes :
 | `test_processing.py` | tests sans matériel du filtrage et du contrôle qualité |
 | `test_affichage.py` | prototype de rafraîchissement de l'affichage |
 | `test_api.m`, `test_wrapper.m` | essais de connexion MCC côté MATLAB |
+| `tests/test_EMG_GUI_digilent.m` | tests MATLAB sans matériel de mise en page et d'analyse fréquentielle |
 | `load_mccdaq_assembly.m` | chargement robuste et diagnostic de la DLL MCC pour MATLAB |
 | `usb-1208fs-plus-users-guide.pdf` | documentation de la carte d'acquisition |
 
@@ -239,8 +359,9 @@ Le CSV contient les colonnes suivantes :
 - La simulation Python est limitée à un essai de 5 secondes.
 - Les exports Python ne sauvegardent pas encore les métadonnées d'une séance
   (muscles, participant, placement, condition et valeurs MVC).
-- La synchronisation vidéo est approximative et adaptée à la rétroaction
-  pédagogique, pas à une mesure cinématique image par image.
+- La version MATLAB horodate les images et les blocs EMG à partir d'un départ
+  logiciel commun; une synchronisation matérielle reste nécessaire pour une
+  mesure cinématique image par image.
 - Les scripts `test_*.py` interrogent le matériel directement et ne sont pas
   des tests automatisés exécutables sans carte MCC.
 
@@ -284,6 +405,18 @@ Pour vérifier rapidement la syntaxe du programme principal :
 python -m py_compile EMG_GUI_diligent.py EMG_GUI_pyqtgraph.py
 python -m unittest -v test_processing.py
 ```
+
+Pour vérifier l'interface MATLAB sans webcam et sans carte MCC :
+
+```matlab
+results = runtests('tests/test_EMG_GUI_digilent.m');
+assertSuccess(results);
+```
+
+Ces tests contrôlent notamment les espaces réservés aux titres et labels, le
+bouton de lecture vidéo placé devant le curseur, la détection de fréquences
+connues sur les deux voies et le rejet optionnel de `60 Hz` et de ses
+harmoniques.
 
 Les paramètres principaux (`FS`, durée MVC, taille de fenêtre RMS et cadence
 d'affichage) se trouvent au début de `EMG_GUI_diligent.py`.

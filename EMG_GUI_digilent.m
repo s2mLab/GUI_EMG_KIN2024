@@ -1,4 +1,4 @@
-function EMG_GUI_digilent()
+function f = EMG_GUI_digilent()
 % EMG GUI — Digilent/MCC (USB-1208FS-PLUS) OR TEST MODE (no hardware)
 %
 % This version:
@@ -8,6 +8,7 @@ function EMG_GUI_digilent()
 
     f = figure('Name','EMG Acquisition pedagogique','NumberTitle','off', ...
         'Position',[100,100,1200,820],'Units','normalized', ...
+        'Tag','EMG_GUI_digilent', ...
         'CloseRequestFcn', @onClose);
 
 
@@ -39,27 +40,55 @@ function EMG_GUI_digilent()
     setappdata(f,'mvc_values',[0 0]);
     setappdata(f,'rec_count',0);
     setappdata(f,'recordings_raw',{});
+    setappdata(f,'recordings_time',{});
     setappdata(f,'rawBuf',[]);
+    setappdata(f,'timeBuf',[]);
     setappdata(f,'sampleIdx',0);
-    setappdata(f,'test_mode',true);
+    setappdata(f,'test_mode',false);
     setappdata(f,'guided_mode',true);
     setappdata(f,'hardware_scan_enabled',true);
     setappdata(f,'isRecording',false);
+    setappdata(f,'isPreparing',false);
+    setappdata(f,'notch_enabled',true);
+    setappdata(f,'display_overlay_mode','comparison');
 
     setappdata(f,'sim_data',[]);
     setappdata(f,'sim_idx_record',1);  % record index
     setappdata(f,'sim_idx_mvc',1);     % MVC index (separate!)
     setappdata(f,'recBlinkOn',false);
     setappdata(f,'video_camera',[]);
+    setappdata(f,'video_input',[]);
+    setappdata(f,'video_backend','none');
     setappdata(f,'video_writer',[]);
     setappdata(f,'video_file','');
     setappdata(f,'video_frame_count',0);
     setappdata(f,'video_fps',10);
+    setappdata(f,'video_reader',[]);
+    setappdata(f,'video_duration',0);
+    setappdata(f,'video_frame_times',[]);
+    setappdata(f,'video_trigger_clock',[]);
+    setappdata(f,'video_capture_start_time',0);
+    setappdata(f,'video_preview_seconds',5);
+    setappdata(f,'video_capture_fps',5);
+    setappdata(f,'video_next_capture_time',0);
+    setappdata(f,'video_display_decimation',2);
+    setappdata(f,'video_playback_target_fps',5);
     setappdata(f,'video_playing',false);
+    setappdata(f,'playback_cursor_lines',[]);
+    setappdata(f,'cursor_max_time',0);
+    setappdata(f,'cursor_drag_active',false);
+    setappdata(f,'cursor_drag_axis',[]);
 
     %% Build UI & connect
     buildUI();
     setappdata(f,'sim_data',buildSimData(Fs));
+    setappdata(f,'testHooks',struct( ...
+        'plotFinalAndStore',@plotFinalAndStore, ...
+        'computePowerSpectrum',@computePowerSpectrum, ...
+        'preprocessEMG',@(raw,enabled) preprocessEMG(raw,Fs,enabled), ...
+        'filterEMG',@(raw,enabled) filterEMG(raw,Fs,enabled), ...
+        'updateSignalQuality',@(raw,mvc,channels) updateSignalQuality(f,raw,Fs,mvc,channels), ...
+        'dependencyReport',@buildDependencyReport));
     connectDAQ();
 
     % ============================
@@ -90,7 +119,8 @@ function EMG_GUI_digilent()
         setappdata(f,'mvcTxt',mvcTxt);
 
         qualityTxt = uicontrol(f,'Style','text','String','Qualite : en attente de signal', ...
-            'Units','normalized','Position',[0.05,0.805,0.90,0.035], ...
+            'Units','normalized','Position',[0.05,0.815,0.90,0.035], ...
+            'Tag','qualityTxt', ...
             'FontSize',11,'HorizontalAlignment','left', ...
             'ForegroundColor',[0.25 0.25 0.25]);
         setappdata(f,'qualityTxt',qualityTxt);
@@ -107,46 +137,79 @@ function EMG_GUI_digilent()
         setappdata(f,'popupPair',popupPair);
 
         % Axes
-        ax_raw1  = axes(f,'Units','normalized','Position',[0.04,0.50,0.29,0.29]); hold(ax_raw1,'on');
-        ax_raw2  = axes(f,'Units','normalized','Position',[0.38,0.50,0.29,0.29]); hold(ax_raw2,'on');
-        ax_filt1 = axes(f,'Units','normalized','Position',[0.04,0.11,0.29,0.29]); hold(ax_filt1,'on');
-        ax_filt2 = axes(f,'Units','normalized','Position',[0.38,0.11,0.29,0.29]); hold(ax_filt2,'on');
+        ax_raw1  = axes(f,'Units','normalized','Position',[0.04,0.52,0.29,0.24], ...
+            'Tag','ax_raw1'); hold(ax_raw1,'on');
+        ax_raw2  = axes(f,'Units','normalized','Position',[0.38,0.52,0.29,0.24], ...
+            'Tag','ax_raw2'); hold(ax_raw2,'on');
+        ax_filt1 = axes(f,'Units','normalized','Position',[0.04,0.14,0.29,0.25], ...
+            'Tag','ax_filt1'); hold(ax_filt1,'on');
+        ax_filt2 = axes(f,'Units','normalized','Position',[0.38,0.14,0.29,0.25], ...
+            'Tag','ax_filt2'); hold(ax_filt2,'on');
 
         setappdata(f,'ax_raw1',ax_raw1);
         setappdata(f,'ax_raw2',ax_raw2);
         setappdata(f,'ax_filt1',ax_filt1);
         setappdata(f,'ax_filt2',ax_filt2);
 
-        ax_video = axes(f,'Units','normalized','Position',[0.72,0.45,0.25,0.30]);
+        ax_video = axes(f,'Units','normalized','Position',[0.72,0.52,0.25,0.24], ...
+            'Tag','ax_video');
         axis(ax_video,'off');
         title(ax_video,'Webcam');
         setappdata(f,'ax_video',ax_video);
         setappdata(f,'video_image',[]);
 
+        videoPlay = uicontrol(f,'Style','togglebutton','String','▶', ...
+            'Units','normalized','Position',[0.72,0.475,0.035,0.034], ...
+            'Tag','videoPlay', ...
+            'FontSize',14,'FontWeight','bold','Enable','off', ...
+            'TooltipString','Lire la video', ...
+            'Callback',@(src,~) toggleVideoPlayback(src));
+        setappdata(f,'videoPlay',videoPlay);
+
         videoSlider = uicontrol(f,'Style','slider','Units','normalized', ...
-            'Position',[0.72,0.385,0.25,0.032],'Min',1,'Max',2,'Value',1, ...
-            'Enable','off','Callback',@(src,~) seekVideo(src));
+            'Position',[0.762,0.479,0.208,0.026],'Min',1,'Max',2,'Value',1, ...
+            'Tag','videoSlider', ...
+            'Enable','off','Callback',@seekVideo);
         setappdata(f,'videoSlider',videoSlider);
 
         videoTxt = uicontrol(f,'Style','text','String','Video : aucune capture', ...
-            'Units','normalized','Position',[0.72,0.35,0.25,0.03], ...
+            'Units','normalized','Position',[0.72,0.438,0.25,0.027], ...
+            'Tag','videoTxt', ...
             'FontSize',10,'HorizontalAlignment','center');
         setappdata(f,'videoTxt',videoTxt);
 
-        videoPlay = uicontrol(f,'Style','togglebutton','String','Lire video', ...
-            'Units','normalized','Position',[0.77,0.295,0.15,0.04], ...
-            'FontSize',11,'Enable','off','Callback',@(src,~) toggleVideoPlayback(src));
-        setappdata(f,'videoPlay',videoPlay);
+        uicontrol(f,'Style','text','String','Affichage :', ...
+            'Units','normalized','Position',[0.72,0.398,0.075,0.025], ...
+            'FontSize',10,'HorizontalAlignment','left');
+        displayMode = uicontrol(f,'Style','popupmenu', ...
+            'String',{'Brut + filtre','EMG1 + EMG2'}, ...
+            'Units','normalized','Position',[0.795,0.397,0.175,0.032], ...
+            'FontSize',10,'Value',2,'Tag','displayMode', ...
+            'Callback',@(src,~) changeDisplayMode(src));
+        setappdata(f,'displayMode',displayMode);
+
+        ax_freq = axes(f,'Units','normalized','Position',[0.72,0.14,0.25,0.20], ...
+            'Tag','ax_freq');
+        hold(ax_freq,'on');
+        setappdata(f,'ax_freq',ax_freq);
 
         % Buttons (top row)
-        btnTest = uicontrol(f,'Style','togglebutton','String','TEST', ...
-            'Units','normalized','Position',[0.25,0.87,0.07,0.045],'FontSize',12, ...
-            'Value',1, ...
+        testCheck = uicontrol(f,'Style','checkbox','String','Mode TEST (simulation)', ...
+            'Units','normalized','Position',[0.04,0.02,0.18,0.035],'FontSize',10, ...
+            'Tag','testCheck','Value',0, ...
             'Callback',@(src,~) toggleTestMode(src));
-        setappdata(f,'btnTest',btnTest);
+        setappdata(f,'testCheck',testCheck);
+
+        uicontrol(f,'Style','pushbutton','String','Bilan installations', ...
+            'Units','normalized','Position',[0.235,0.02,0.12,0.035],'FontSize',9, ...
+            'Tag','dependencyReportButton','Callback',@(~,~) showDependencyReport());
+        dependencySummary = uicontrol(f,'Style','text','String','', ...
+            'Units','normalized','Position',[0.365,0.02,0.225,0.035], ...
+            'Tag','dependencySummary','FontSize',9,'HorizontalAlignment','left');
+        setappdata(f,'dependencySummary',dependencySummary);
 
         btnGuide = uicontrol(f,'Style','togglebutton','String','GUIDE', ...
-            'Units','normalized','Position',[0.33,0.87,0.08,0.045],'FontSize',12, ...
+            'Units','normalized','Position',[0.25,0.87,0.08,0.045],'FontSize',12, ...
             'Value',1,'Callback',@(src,~) toggleGuidedMode(src));
         setappdata(f,'btnGuide',btnGuide);
 
@@ -154,6 +217,12 @@ function EMG_GUI_digilent()
             'Units','normalized','Position',[0.61,0.87,0.14,0.045],'FontSize',13, ...
             'Callback',@(src,~) startStopDAQ(src));
         setappdata(f,'btnStart',btnStart);
+
+        notchCheck = uicontrol(f,'Style','checkbox','String','Notch 60 Hz + harmoniques', ...
+            'Units','normalized','Position',[0.77,0.875,0.20,0.035], ...
+            'FontSize',10,'Value',1,'Tag','notchCheck', ...
+            'Callback',@(src,~) toggleNotchFilter(src));
+        setappdata(f,'notchCheck',notchCheck);
 
         uicontrol(f,'Style','pushbutton','String','MVC 1', ...
             'Units','normalized','Position',[0.43,0.87,0.08,0.045],'FontSize',13, ...
@@ -166,15 +235,18 @@ function EMG_GUI_digilent()
         % Bottom buttons
         uicontrol(f,'Style','pushbutton','String','Exporter les graphiques', ...
             'Units','normalized','Position',[0.60,0.02,0.18,0.035],'FontSize',12, ...
-            'Callback',@(~,~) exportGraphs(f,ax_raw1,ax_raw2,ax_filt1,ax_filt2));
+            'Tag','exportGraphs', ...
+            'Callback',@(~,~) exportGraphs(f,ax_raw1,ax_raw2,ax_filt1,ax_filt2,ax_freq));
 
         uicontrol(f,'Style','pushbutton','String','Exporter CSV', ...
             'Units','normalized','Position',[0.80,0.02,0.18,0.035],'FontSize',12, ...
+            'Tag','exportCSV', ...
             'Callback',@(~,~) exportCSV(f));
 
         % Initial axes labels/titles + create live lines
         resetAllAxes('idle');
         updateGuide();
+        updateDependencySummary();
     end
 
     % ============================
@@ -193,12 +265,16 @@ function EMG_GUI_digilent()
         popupPair = getappdata(f,'popupPair');
         btnStart  = getappdata(f,'btnStart');
         recTxt    = getappdata(f,'recTxt');
+        displayMode = getappdata(f,'displayMode');
 
         if isempty(popupPair) || ~isvalid(popupPair), return, end
 
         switch state
             case 'idle'
                 set(popupPair,'Enable','on');
+                if ~isempty(displayMode) && isvalid(displayMode)
+                    set(displayMode,'Enable','on');
+                end
                 if ~isempty(btnStart) && isvalid(btnStart)
                     btnStart.Value = 0;
                     btnStart.String = 'Enregistrer';
@@ -210,6 +286,9 @@ function EMG_GUI_digilent()
 
             case 'recording'
                 set(popupPair,'Enable','off');
+                if ~isempty(displayMode) && isvalid(displayMode)
+                    set(displayMode,'Enable','off');
+                end
                 if ~isempty(btnStart) && isvalid(btnStart)
                     btnStart.String = 'Stop';
                 end
@@ -220,6 +299,9 @@ function EMG_GUI_digilent()
 
             case 'mvc'
                 set(popupPair,'Enable','off');
+                if ~isempty(displayMode) && isvalid(displayMode)
+                    set(displayMode,'Enable','off');
+                end
         end
     end
 
@@ -228,27 +310,53 @@ function EMG_GUI_digilent()
         ax_raw2  = getappdata(f,'ax_raw2');
         ax_filt1 = getappdata(f,'ax_filt1');
         ax_filt2 = getappdata(f,'ax_filt2');
+        ax_freq  = getappdata(f,'ax_freq');
+
+        setappdata(f,'playback_cursor_lines',[]);
+        setappdata(f,'cursor_drag_active',false);
+        setappdata(f,'cursor_drag_axis',[]);
+        set(f,'WindowButtonMotionFcn','','WindowButtonUpFcn','');
+        set([ax_raw1 ax_raw2 ax_filt1 ax_filt2],'ButtonDownFcn','');
 
         cla(ax_raw1);  hold(ax_raw1,'on');
         cla(ax_raw2);  hold(ax_raw2,'on');
         cla(ax_filt1); hold(ax_filt1,'on');
         cla(ax_filt2); hold(ax_filt2,'on');
+        cla(ax_freq);  hold(ax_freq,'on');
 
         applyAxisStyle(ax_raw1,  'EMG1 brut', color_emg1, 'Activité (V)');
         applyAxisStyle(ax_raw2,  'EMG2 brut', color_emg2, 'Activité (V)');
         styleEnvelopeAxis(ax_filt1, 1, color_emg1);
         styleEnvelopeAxis(ax_filt2, 2, color_emg2);
+        title(ax_freq,'Analyse frequentielle');
+        xlabel(ax_freq,'Frequence (Hz)');
+        ylabel(ax_freq,'DSP (dB/Hz)');
+        xlim(ax_freq,[0 500]);
+        grid(ax_freq,'on');
+        hideAxesToolbar([ax_raw1 ax_raw2 ax_filt1 ax_filt2 ax_freq]);
 
         % Live lines (raw + filt)
         hLine_raw1  = plot(ax_raw1, nan, nan, '-', 'Color', color_emg1);
         hLine_raw2  = plot(ax_raw2, nan, nan, '-', 'Color', color_emg2);
         hLine_filt1 = plot(ax_filt1,nan, nan, '-', 'Color', color_emg1);
         hLine_filt2 = plot(ax_filt2,nan, nan, '-', 'Color', color_emg2);
+        hLine_processed1 = [];
+        hLine_processed2 = [];
+        if strcmp(getappdata(f,'display_overlay_mode'),'raw_filtered') && strcmp(context,'recording')
+            setLineAlphaOrLighten(hLine_raw1, color_emg1, alpha_overlay);
+            setLineAlphaOrLighten(hLine_raw2, color_emg2, alpha_overlay);
+            hLine_processed1 = plot(ax_raw1,nan,nan,'-','Color',color_emg1, ...
+                'LineWidth',1.1,'Tag','filteredOverlay');
+            hLine_processed2 = plot(ax_raw2,nan,nan,'-','Color',color_emg2, ...
+                'LineWidth',1.1,'Tag','filteredOverlay');
+        end
 
         setappdata(f,'hLine_raw1',hLine_raw1);
         setappdata(f,'hLine_raw2',hLine_raw2);
         setappdata(f,'hLine_filt1',hLine_filt1);
         setappdata(f,'hLine_filt2',hLine_filt2);
+        setappdata(f,'hLine_processed1',hLine_processed1);
+        setappdata(f,'hLine_processed2',hLine_processed2);
 
         if any(strcmp(context, {'recording','mvc'}))
             set(ax_raw1,'XLim',[0 5]);
@@ -320,32 +428,57 @@ function EMG_GUI_digilent()
         end
     end
 
-    function startVideoCapture()
+    function hasVideo = prepareVideoCapture()
         stopVideoPlayback();
         setappdata(f,'video_file','');
         setappdata(f,'video_frame_count',0);
+        setappdata(f,'video_reader',[]);
+        setappdata(f,'video_duration',0);
+        setappdata(f,'video_frame_times',[]);
+        setappdata(f,'video_trigger_clock',[]);
+        setappdata(f,'video_capture_start_time',0);
+        setappdata(f,'video_input',[]);
+        setappdata(f,'video_backend','none');
         videoSlider = getappdata(f,'videoSlider');
         videoPlay = getappdata(f,'videoPlay');
         set(videoSlider,'Enable','off','Value',1);
-        set(videoPlay,'Enable','off','Value',0,'String','Lire video');
+        set(videoPlay,'Enable','off','Value',0,'String','▶','TooltipString','Lire la video');
         cam = [];
-        writer = [];
+        hasVideo = false;
+        if exist('webcam','file') ~= 2 && exist('webcam','class') ~= 8
+            setappdata(f,'video_camera',[]);
+            setappdata(f,'video_writer',[]);
+            set(getappdata(f,'videoTxt'),'String','Video : webcam indisponible');
+            setStatus('EMG actif; webcam indisponible (support package requis).', [0.75 0.35 0]);
+            return
+        end
         try
             cam = webcam;
-            frame = snapshot(cam);
-            filename = ['emg_video_' datestr(now,'yyyymmdd_HHMMSS') '.mp4'];
-            writer = VideoWriter(filename,'MPEG-4');
-            writer.FrameRate = getappdata(f,'video_fps');
-            open(writer);
-            writeVideo(writer,frame);
             setappdata(f,'video_camera',cam);
-            setappdata(f,'video_writer',writer);
-            setappdata(f,'video_file',filename);
-            setappdata(f,'video_frame_count',1);
-            set(getappdata(f,'videoTxt'),'String','Video : enregistrement webcam en cours');
-            showVideoFrame(frame);
+            setappdata(f,'video_writer',[]);
+            previewSeconds = getappdata(f,'video_preview_seconds');
+            countdown = tic;
+            while ishandle(f) && getappdata(f,'isPreparing') && toc(countdown) < previewSeconds
+                frame = snapshot(cam);
+                showVideoFrame(frame);
+                remaining = max(0,ceil(previewSeconds - toc(countdown)));
+                set(getappdata(f,'videoTxt'),'String', ...
+                    sprintf('Positionnement : depart dans %d s',remaining));
+                setStatus('Placez-vous devant la camera; depart automatique imminent.', [0.2 0.2 0.2]);
+                drawnow limitrate;
+                pause(0.05);
+            end
+            hasVideo = ishandle(f);
+            if hasVideo && hasParallelVideoAdaptor()
+                setappdata(f,'video_camera',[]);
+                clear cam
+                setappdata(f,'video_backend','imaq');
+                set(getappdata(f,'videoTxt'),'String','Video : capture parallele prete');
+            else
+                setappdata(f,'video_backend','webcam');
+                set(getappdata(f,'videoTxt'),'String','Video : mode webcam non parallele');
+            end
         catch ME
-            if ~isempty(writer), try close(writer); catch, end, end
             clear cam
             setappdata(f,'video_camera',[]);
             setappdata(f,'video_writer',[]);
@@ -354,15 +487,101 @@ function EMG_GUI_digilent()
         end
     end
 
+    function toggleNotchFilter(src)
+        enabled = logical(get(src,'Value'));
+        setappdata(f,'notch_enabled',enabled);
+        if enabled
+            setStatus('Filtre notch actif : 60 Hz et harmoniques.', [0.2 0.2 0.2]);
+        else
+            setStatus('Filtre notch desactive : bruit secteur conserve.', [0.75 0.35 0]);
+        end
+    end
+
+    function changeDisplayMode(src)
+        if get(src,'Value') == 1
+            setappdata(f,'display_overlay_mode','raw_filtered');
+            setStatus('Affichage : signal brut transparent et signal filtre.', [0.2 0.2 0.2]);
+        else
+            setappdata(f,'display_overlay_mode','comparison');
+            setStatus('Affichage : comparaison EMG1 et EMG2.', [0.2 0.2 0.2]);
+        end
+        rawBuf = getappdata(f,'rawBuf');
+        timeBuf = getappdata(f,'timeBuf');
+        if ~isempty(rawBuf) && ~isempty(timeBuf) && ~getappdata(f,'isRecording')
+            plotFinalAndStore(rawBuf,timeBuf,false);
+        end
+    end
+
+    function hideAxesToolbar(axesList)
+        for k = 1:numel(axesList)
+            try
+                axesList(k).Toolbar.Visible = 'off';
+            catch
+                % Toolbar control is unavailable on older MATLAB releases.
+            end
+        end
+    end
+
+    function startTriggeredVideoCapture(hasVideo)
+        if ~hasVideo, return, end
+        vid = [];
+        try
+            if strcmp(getappdata(f,'video_backend'),'imaq')
+                filename = ['emg_video_' datestr(now,'yyyymmdd_HHMMSS') '.avi'];
+                writer = VideoWriter(filename,'Motion JPEG AVI');
+                writer.FrameRate = getappdata(f,'video_capture_fps');
+                vid = videoinput('winvideo',1);
+                vid.LoggingMode = 'disk';
+                vid.FramesPerTrigger = Inf;
+                vid.DiskLogger = writer;
+                setappdata(f,'video_input',vid);
+                setappdata(f,'video_writer',[]);
+                setappdata(f,'video_file',filename);
+                start(vid);
+                setappdata(f,'video_capture_start_time',toc(getappdata(f,'video_trigger_clock')));
+                set(getappdata(f,'videoTxt'),'String','Video : capture parallele en cours');
+                return
+            end
+            filename = ['emg_video_' datestr(now,'yyyymmdd_HHMMSS') '.mp4'];
+            writer = VideoWriter(filename,'MPEG-4');
+            writer.FrameRate = getappdata(f,'video_capture_fps');
+            open(writer);
+            setappdata(f,'video_writer',writer);
+            setappdata(f,'video_file',filename);
+            setappdata(f,'video_frame_count',0);
+            setappdata(f,'video_frame_times',[]);
+            setappdata(f,'video_next_capture_time',0);
+            set(getappdata(f,'videoTxt'),'String','Video : capture webcam horodatee');
+        catch ME
+            if ~isempty(vid), try delete(vid); catch, end, end
+            setappdata(f,'video_input',[]);
+            setappdata(f,'video_writer',[]);
+            setappdata(f,'video_camera',[]);
+            setStatus('EMG actif; demarrage video impossible.', [0.75 0.35 0]);
+            disp(getReport(ME,'extended'));
+        end
+    end
+
     function captureVideoFrame()
+        if strcmp(getappdata(f,'video_backend'),'imaq')
+            return
+        end
         cam = getappdata(f,'video_camera');
         writer = getappdata(f,'video_writer');
         if isempty(cam) || isempty(writer), return, end
         try
+            triggerClock = getappdata(f,'video_trigger_clock');
+            beforeSnapshot = toc(triggerClock);
+            if beforeSnapshot < getappdata(f,'video_next_capture_time')
+                return
+            end
             frame = snapshot(cam);
+            frameTime = 0.5 * (beforeSnapshot + toc(triggerClock));
             writeVideo(writer,frame);
             setappdata(f,'video_frame_count',getappdata(f,'video_frame_count') + 1);
-            showVideoFrame(frame);
+            frameTimes = getappdata(f,'video_frame_times');
+            setappdata(f,'video_frame_times',[frameTimes frameTime]);
+            setappdata(f,'video_next_capture_time',frameTime + 1/getappdata(f,'video_capture_fps'));
         catch ME
             setStatus('Capture webcam interrompue; acquisition EMG maintenue.', [0.75 0.35 0]);
             disp(getReport(ME,'extended'));
@@ -370,6 +589,22 @@ function EMG_GUI_digilent()
     end
 
     function stopVideoCapture()
+        vid = getappdata(f,'video_input');
+        if ~isempty(vid)
+            try
+                stop(vid);
+                frameCount = double(vid.FramesAcquired);
+                fps = max(getappdata(f,'video_capture_fps'),1);
+                t0 = getappdata(f,'video_capture_start_time');
+                if frameCount > 0
+                    setappdata(f,'video_frame_times',t0 + (0:frameCount-1)/fps);
+                end
+                delete(vid);
+            catch ME
+                disp(getReport(ME,'extended'));
+            end
+        end
+        setappdata(f,'video_input',[]);
         writer = getappdata(f,'video_writer');
         if ~isempty(writer)
             try close(writer); catch, end
@@ -380,14 +615,24 @@ function EMG_GUI_digilent()
         if isempty(filename) || ~isfile(filename), return, end
         try
             reader = VideoReader(filename);
-            frameCount = max(1,floor(reader.Duration * reader.FrameRate));
+            frameTimes = getappdata(f,'video_frame_times');
+            if isempty(frameTimes)
+                frameCount = max(1,floor(reader.Duration * reader.FrameRate));
+                frameTimes = (0:frameCount-1) / max(reader.FrameRate,1);
+                setappdata(f,'video_frame_times',frameTimes);
+            else
+                frameCount = numel(frameTimes);
+            end
+            setappdata(f,'video_reader',reader);
             setappdata(f,'video_frame_count',frameCount);
             setappdata(f,'video_fps',reader.FrameRate);
+            setappdata(f,'video_duration',frameTimes(end));
             slider = getappdata(f,'videoSlider');
             step = 1 / max(frameCount - 1, 1);
             set(slider,'Min',1,'Max',max(2,frameCount),'Value',1, ...
                 'SliderStep',[step min(1,10*step)],'Enable','on');
-            set(getappdata(f,'videoPlay'),'Enable','on','Value',0,'String','Lire video');
+            set(getappdata(f,'videoPlay'),'Enable','on','Value',0,'String','▶', ...
+                'TooltipString','Lire la video');
             seekVideo(slider);
         catch ME
             set(getappdata(f,'videoTxt'),'String','Video : fichier illisible');
@@ -395,46 +640,64 @@ function EMG_GUI_digilent()
         end
     end
 
-    function seekVideo(slider)
+    function seekVideo(slider,varargin) %#ok<INUSD>
         filename = getappdata(f,'video_file');
         if isempty(filename) || ~isfile(filename), return, end
-        reader = VideoReader(filename);
         frameIndex = round(get(slider,'Value'));
         frameIndex = min(frameIndex, max(1,getappdata(f,'video_frame_count')));
-        reader.CurrentTime = min((frameIndex-1) / max(reader.FrameRate,1), ...
+        fps = max(getappdata(f,'video_fps'),1);
+        frameTimes = getappdata(f,'video_frame_times');
+        signalTime = frameTimes(frameIndex);
+        mediaTime = (frameIndex-1) / fps;
+        displayVideoAtTime(mediaTime,signalTime);
+        updatePlaybackCursor(signalTime);
+    end
+
+    function displayVideoAtTime(mediaTime,signalTime)
+        reader = getappdata(f,'video_reader');
+        filename = getappdata(f,'video_file');
+        if isempty(reader)
+            reader = VideoReader(filename);
+            setappdata(f,'video_reader',reader);
+        end
+        duration = max(0, getappdata(f,'video_duration'));
+        reader.CurrentTime = min(max(0,mediaTime), ...
             max(0, reader.Duration - 1/max(reader.FrameRate,1)));
         if hasFrame(reader)
-            showVideoFrame(readFrame(reader));
+            frame = readFrame(reader);
+            step = max(1,round(getappdata(f,'video_display_decimation')));
+            showVideoFrame(frame(1:step:end,1:step:end,:));
         end
-        duration = max(0, reader.Duration);
-        currentTime = (frameIndex-1) / max(reader.FrameRate,1);
         set(getappdata(f,'videoTxt'),'String', ...
-            sprintf('Video : %.1f / %.1f s',currentTime,duration));
+            sprintf('Video sync : %.2f / %.2f s',signalTime,duration));
     end
 
     function toggleVideoPlayback(src)
         if src.Value == 0
-            set(src,'String','Lire video');
+            set(src,'String','▶','TooltipString','Lire la video');
             setappdata(f,'video_playing',false);
             return
         end
-        set(src,'String','Pause');
+        set(src,'String','❚❚','TooltipString','Mettre en pause');
         setappdata(f,'video_playing',true);
         slider = getappdata(f,'videoSlider');
-        fps = max(getappdata(f,'video_fps'),1);
+        frameTimes = getappdata(f,'video_frame_times');
+        displayInterval = 1 / max(getappdata(f,'video_playback_target_fps'),1);
         while ishandle(f) && getappdata(f,'video_playing') && src.Value == 1
-            nextFrame = round(get(slider,'Value')) + 1;
-            if nextFrame > get(slider,'Max')
+            currentFrame = round(get(slider,'Value'));
+            targetTime = frameTimes(currentFrame) + displayInterval;
+            nextFrame = find(frameTimes >= targetTime,1,'first');
+            if isempty(nextFrame)
                 src.Value = 0;
                 break
             end
             set(slider,'Value',nextFrame);
             seekVideo(slider);
             drawnow;
-            pause(1/fps);
+            pause(max(0,frameTimes(nextFrame)-frameTimes(currentFrame)));
         end
         if ishandle(src)
-            set(src,'String','Lire video','Value',0);
+            set(src,'String','▶','TooltipString','Lire la video','Value',0);
         end
         setappdata(f,'video_playing',false);
     end
@@ -443,7 +706,166 @@ function EMG_GUI_digilent()
         setappdata(f,'video_playing',false);
         videoPlay = getappdata(f,'videoPlay');
         if ~isempty(videoPlay) && isvalid(videoPlay)
-            set(videoPlay,'Value',0,'String','Lire video');
+            set(videoPlay,'Value',0,'String','▶','TooltipString','Lire la video');
+        end
+    end
+
+    function available = hasParallelVideoAdaptor()
+        available = false;
+        if exist('videoinput','file') ~= 2
+            return
+        end
+        try
+            info = imaqhwinfo;
+            available = any(strcmpi(info.InstalledAdaptors,'winvideo'));
+        catch
+            available = false;
+        end
+    end
+
+    function updateDependencySummary()
+        summary = getappdata(f,'dependencySummary');
+        if isempty(summary) || ~isvalid(summary), return, end
+        availability = assessDependencies();
+        missing = {};
+        if ~availability.signalProcessing, missing{end+1} = 'Signal Toolbox'; end %#ok<AGROW>
+        if ~availability.mcc, missing{end+1} = 'MCC'; end %#ok<AGROW>
+        if ~availability.webcam, missing{end+1} = 'Webcam'; end %#ok<AGROW>
+        if ~availability.parallelVideo, missing{end+1} = 'Video parallele'; end %#ok<AGROW>
+        if isempty(missing)
+            text = 'Installation : complete';
+            col = [0 0.45 0.20];
+        else
+            text = ['A installer : ' strjoin(missing, ', ')];
+            col = [0.75 0.35 0];
+        end
+        set(summary,'String',text,'ForegroundColor',col, ...
+            'TooltipString',buildDependencyReport());
+    end
+
+    function showDependencyReport()
+        msgbox(buildDependencyReport(),'Bilan des installations MATLAB','help');
+    end
+
+    function report = buildDependencyReport()
+        availability = assessDependencies();
+        lines = {'Bilan des composants disponibles :'};
+        lines{end+1} = dependencyLine(availability.signalProcessing, ...
+            'Signal Processing Toolbox', ...
+            'installer Signal Processing Toolbox pour le filtrage et le spectre');
+        lines{end+1} = dependencyLine(availability.mcc, ...
+            'MccDaq / InstaCal', ...
+            'installer Universal Library et configurer la carte avec InstaCal');
+        lines{end+1} = dependencyLine(availability.webcam, ...
+            'Support Package USB Webcams', ...
+            'installer MATLAB Support Package for USB Webcams');
+        lines{end+1} = dependencyLine(availability.parallelVideo, ...
+            'Capture video parallele winvideo', ...
+            'installer Image Acquisition Toolbox et OS Generic Video Interface');
+        report = strjoin(lines,newline);
+    end
+
+    function availability = assessDependencies()
+        availability.signalProcessing = exist('butter','file') == 2 && ...
+            exist('filtfilt','file') == 2 && exist('pwelch','file') == 2;
+        availability.mcc = ~isempty(getappdata(f,'mcc_board'));
+        availability.webcam = exist('webcam','file') == 2 || exist('webcam','class') == 8;
+        availability.parallelVideo = hasParallelVideoAdaptor();
+    end
+
+    function text = dependencyLine(isAvailable,name,installAction)
+        if isAvailable
+            text = ['[OK] ' name];
+        else
+            text = ['[MANQUANT] ' name ' : ' installAction '.'];
+        end
+    end
+
+    function installPlaybackCursor()
+        axesList = [getappdata(f,'ax_raw1'), getappdata(f,'ax_raw2'), ...
+            getappdata(f,'ax_filt1'), getappdata(f,'ax_filt2')];
+        cursorLines = gobjects(1,numel(axesList));
+        for k = 1:numel(axesList)
+            ax = axesList(k);
+            set(ax,'ButtonDownFcn',@selectCursorFromAxis);
+            children = findobj(ax,'Type','line');
+            set(children,'HitTest','off','PickableParts','none');
+            yl = ylim(ax);
+            cursorLines(k) = line(ax,[0 0],yl,'Color',[0.85 0.10 0.10], ...
+                'LineWidth',1.5,'HitTest','on','PickableParts','all', ...
+                'ButtonDownFcn',@startCursorDrag);
+        end
+        setappdata(f,'playback_cursor_lines',cursorLines);
+        updatePlaybackCursor(0);
+    end
+
+    function selectCursorFromAxis(src,~)
+        previewCursorTime(src.CurrentPoint(1,1));
+        setappdata(f,'cursor_drag_axis',src);
+        setappdata(f,'cursor_drag_active',true);
+        set(f,'WindowButtonMotionFcn',@dragPlaybackCursor, ...
+            'WindowButtonUpFcn',@stopCursorDrag);
+    end
+
+    function startCursorDrag(src,~)
+        ax = ancestor(src,'axes');
+        previewCursorTime(ax.CurrentPoint(1,1));
+        setappdata(f,'cursor_drag_axis',ax);
+        setappdata(f,'cursor_drag_active',true);
+        set(f,'WindowButtonMotionFcn',@dragPlaybackCursor, ...
+            'WindowButtonUpFcn',@stopCursorDrag);
+    end
+
+    function dragPlaybackCursor(~,~)
+        if ~getappdata(f,'cursor_drag_active'), return, end
+        ax = getappdata(f,'cursor_drag_axis');
+        if isempty(ax) || ~isvalid(ax), return, end
+        previewCursorTime(ax.CurrentPoint(1,1));
+    end
+
+    function stopCursorDrag(~,~)
+        ax = getappdata(f,'cursor_drag_axis');
+        setappdata(f,'cursor_drag_active',false);
+        set(f,'WindowButtonMotionFcn','','WindowButtonUpFcn','');
+        if ~isempty(ax) && isvalid(ax)
+            moveCursorToTime(ax.CurrentPoint(1,1));
+        end
+    end
+
+    function moveCursorToTime(timeSec)
+        timeSec = max(0,min(timeSec,getappdata(f,'cursor_max_time')));
+        slider = getappdata(f,'videoSlider');
+        if ~isempty(slider) && isvalid(slider) && strcmp(get(slider,'Enable'),'on')
+            setSliderToTime(slider,timeSec);
+            seekVideo(slider);
+        else
+            updatePlaybackCursor(timeSec);
+        end
+    end
+
+    function previewCursorTime(timeSec)
+        timeSec = max(0,min(timeSec,getappdata(f,'cursor_max_time')));
+        updatePlaybackCursor(timeSec);
+        slider = getappdata(f,'videoSlider');
+        if ~isempty(slider) && isvalid(slider) && strcmp(get(slider,'Enable'),'on')
+            setSliderToTime(slider,timeSec);
+        end
+    end
+
+    function setSliderToTime(slider,timeSec)
+        frameTimes = getappdata(f,'video_frame_times');
+        [~,frameIndex] = min(abs(frameTimes - timeSec));
+        set(slider,'Value',frameIndex);
+    end
+
+    function updatePlaybackCursor(timeSec)
+        cursorLines = getappdata(f,'playback_cursor_lines');
+        if isempty(cursorLines), return, end
+        timeSec = max(0,min(timeSec,getappdata(f,'cursor_max_time')));
+        for k = 1:numel(cursorLines)
+            if isvalid(cursorLines(k))
+                set(cursorLines(k),'XData',[timeSec timeSec]);
+            end
         end
     end
 
@@ -457,6 +879,7 @@ function EMG_GUI_digilent()
 
         if getappdata(f,'test_mode')
             setStatus(sprintf('Mode TEST (simulé) | paire AI%d-%d',ch1,ch2), [0.2 0.2 0.2]);
+            updateDependencySummary();
             updateGuide();
             return
         end
@@ -491,6 +914,7 @@ function EMG_GUI_digilent()
             end
             disp(getReport(ME,'extended'));
         end
+        updateDependencySummary();
 
     end
 
@@ -574,7 +998,7 @@ function EMG_GUI_digilent()
     function block = mccReadBlockScan(board, range, ch1, ch2, nPts, Fs)
         count = int32(nPts * 2);
         memHandle = MccDaq.MccService.ScaledWinBufAllocEx(count);
-        if memHandle == 0
+        if memHandle.ToInt64() == int64(0)
             error('Impossible d''allouer le tampon MCC.');
         end
         cleanup = onCleanup(@() MccDaq.MccService.WinBufFreeEx(memHandle));
@@ -615,7 +1039,19 @@ function EMG_GUI_digilent()
                 updateGuide();
                 return
             end
+            setappdata(f,'isPreparing',true);
+            set(src,'String','Annuler');
+            hasVideo = prepareVideoCapture();
+            setappdata(f,'isPreparing',false);
+            if ~ishandle(f), return, end
+            if src.Value == 0
+                stopVideoCapture();
+                setUIState('idle');
+                setStatus('Preparation annulee.', [0.2 0.2 0.2]);
+                return
+            end
             setappdata(f,'rawBuf',zeros(getappdata(f,'Fs')*60,2));
+            setappdata(f,'timeBuf',zeros(getappdata(f,'Fs')*60,1));
             setappdata(f,'sampleIdx',0);
             setappdata(f,'isRecording',true);
 
@@ -625,7 +1061,8 @@ function EMG_GUI_digilent()
 
             resetAllAxes('recording');
             setUIState('recording');
-            startVideoCapture();
+            setappdata(f,'video_trigger_clock',tic);
+            startTriggeredVideoCapture(hasVideo);
 
             try
                 streamRecording();
@@ -647,6 +1084,10 @@ function EMG_GUI_digilent()
 
         else
             % STOP
+            if getappdata(f,'isPreparing')
+                setappdata(f,'isPreparing',false);
+                return
+            end
             setappdata(f,'isRecording',false);
             setUIState('idle');
             stopVideoCapture();
@@ -654,12 +1095,15 @@ function EMG_GUI_digilent()
             rawBuf = getappdata(f,'rawBuf');
             rawBuf = rawBuf(1:getappdata(f,'sampleIdx'),:);
             setappdata(f,'rawBuf',rawBuf);
+            timeBuf = getappdata(f,'timeBuf');
+            timeBuf = timeBuf(1:getappdata(f,'sampleIdx'));
+            setappdata(f,'timeBuf',timeBuf);
             updateSignalQuality(f, rawBuf, getappdata(f,'Fs'), [], []);
             if isempty(rawBuf)
                 return
             end
 
-            plotFinalAndStore(rawBuf);
+            plotFinalAndStore(rawBuf,timeBuf);
         end
     end
 
@@ -673,16 +1117,24 @@ function EMG_GUI_digilent()
             loopTic = tic;
 
             rawBuf    = getappdata(f,'rawBuf');
+            timeBuf   = getappdata(f,'timeBuf');
             sampleIdx = getappdata(f,'sampleIdx');
 
+            triggerClock = getappdata(f,'video_trigger_clock');
+            blockStart = toc(triggerClock);
             block = acquireBlockUnified('record', chunkPts); % Nx2
+            captureVideoFrame();
             N = size(block,1);
+            blockTimes = blockStart + (0:N-1)'/Fs;
             neededPts = sampleIdx + N;
             if neededPts > size(rawBuf,1)
                 rawBuf = [rawBuf; zeros(Fs*60,2)]; %#ok<AGROW>
+                timeBuf = [timeBuf; zeros(Fs*60,1)]; %#ok<AGROW>
             end
             rawBuf(sampleIdx+1:neededPts,:) = block;
+            timeBuf(sampleIdx+1:neededPts) = blockTimes;
             setappdata(f,'rawBuf',rawBuf);
+            setappdata(f,'timeBuf',timeBuf);
 
             sampleIdx = neededPts;
             setappdata(f,'sampleIdx',sampleIdx);
@@ -694,7 +1146,7 @@ function EMG_GUI_digilent()
                 idx = (totalPts-windowPts+1):totalPts;
             end
 
-            tsec = (idx-idx(1))/Fs;
+            tsec = timeBuf(idx);
 
             ch1win = rawBuf(idx,1);
             ch2win = rawBuf(idx,2);
@@ -709,8 +1161,17 @@ function EMG_GUI_digilent()
             mvc = getappdata(f,'mvc_values');
             if isempty(mvc), mvc = [0 0]; end
 
-            filt1 = filterEMG(ch1win, Fs);
-            filt2 = filterEMG(ch2win, Fs);
+            filt1 = filterEMG(ch1win, Fs, getappdata(f,'notch_enabled'));
+            filt2 = filterEMG(ch2win, Fs, getappdata(f,'notch_enabled'));
+
+            hp1 = getappdata(f,'hLine_processed1');
+            hp2 = getappdata(f,'hLine_processed2');
+            if ~isempty(hp1) && isvalid(hp1)
+                processed1 = preprocessEMG(ch1win, Fs, getappdata(f,'notch_enabled'));
+                processed2 = preprocessEMG(ch2win, Fs, getappdata(f,'notch_enabled'));
+                set(hp1,'XData',tsec,'YData',processed1);
+                set(hp2,'XData',tsec,'YData',processed2);
+            end
 
             if mvc(1)>0, filt1 = 100*(filt1/mvc(1)); end
             if mvc(2)>0, filt2 = 100*(filt2/mvc(2)); end
@@ -719,8 +1180,25 @@ function EMG_GUI_digilent()
             hf2 = getappdata(f,'hLine_filt2');
             if ~isempty(hf1) && isvalid(hf1), set(hf1,'XData',tsec,'YData',filt1,'Color',color_emg1); end
             if ~isempty(hf2) && isvalid(hf2), set(hf2,'XData',tsec,'YData',filt2,'Color',color_emg2); end
+            rawDisplay1 = ch1win;
+            rawDisplay2 = ch2win;
+            if ~isempty(hp1) && isvalid(hp1)
+                rawDisplay1 = [ch1win; processed1];
+                rawDisplay2 = [ch2win; processed2];
+            end
+            fitLiveYLimits(getappdata(f,'ax_raw1'),rawDisplay1);
+            fitLiveYLimits(getappdata(f,'ax_raw2'),rawDisplay2);
+            fitLiveYLimits(getappdata(f,'ax_filt1'),filt1);
+            fitLiveYLimits(getappdata(f,'ax_filt2'),filt2);
+            if ~isempty(tsec)
+                xWindow = [max(0,tsec(end)-5), max(5,tsec(end))];
+                set([getappdata(f,'ax_raw1') getappdata(f,'ax_raw2') ...
+                    getappdata(f,'ax_filt1') getappdata(f,'ax_filt2')],'XLim',xWindow);
+            end
+            if sampleIdx >= Fs && mod(sampleIdx,Fs) < N
+                updateSignalQuality(f,[ch1win ch2win],Fs,[],[]);
+            end
 
-            captureVideoFrame();
             blinkREC();
             drawnow limitrate;
 
@@ -731,56 +1209,117 @@ function EMG_GUI_digilent()
         end
     end
 
-    function plotFinalAndStore(rawBuf)
+    function plotFinalAndStore(rawBuf,timeBuf,shouldStore)
+        if nargin < 3
+            shouldStore = true;
+        end
         Fs = getappdata(f,'Fs');
         mvc = getappdata(f,'mvc_values');
 
         emg1_raw = rawBuf(:,1);
         emg2_raw = rawBuf(:,2);
 
-        filt1 = filterEMG(emg1_raw, Fs);
-        filt2 = filterEMG(emg2_raw, Fs);
+        filteredSignal1 = preprocessEMG(emg1_raw, Fs, getappdata(f,'notch_enabled'));
+        filteredSignal2 = preprocessEMG(emg2_raw, Fs, getappdata(f,'notch_enabled'));
+        filt1 = filterEMG(emg1_raw, Fs, getappdata(f,'notch_enabled'));
+        filt2 = filterEMG(emg2_raw, Fs, getappdata(f,'notch_enabled'));
 
         if ~isempty(mvc)
             if numel(mvc)>=1 && mvc(1)>0, filt1 = 100*(filt1/mvc(1)); end
             if numel(mvc)>=2 && mvc(2)>0, filt2 = 100*(filt2/mvc(2)); end
         end
 
-        tsec_raw  = (0:numel(emg1_raw)-1)/Fs;
-        tsec_filt = (0:numel(filt1)-1)/Fs;
+        tsec_raw  = timeBuf(:)';
+        tsec_filt = tsec_raw;
 
         ax_raw1  = getappdata(f,'ax_raw1');
         ax_raw2  = getappdata(f,'ax_raw2');
         ax_filt1 = getappdata(f,'ax_filt1');
         ax_filt2 = getappdata(f,'ax_filt2');
+        ax_freq  = getappdata(f,'ax_freq');
+        overlayMode = getappdata(f,'display_overlay_mode');
 
         cla(ax_raw1); hold(ax_raw1,'on');
-        plot(ax_raw1, tsec_raw, emg1_raw, '-', 'Color', color_emg1);
-        h = plot(ax_raw1, tsec_raw, emg2_raw, '-', 'Color', color_emg2);
-        setLineAlphaOrLighten(h, color_emg2, alpha_overlay);
-        applyAxisStyle(ax_raw1,'EMG1 brut', color_emg1, 'Activité (V)');
+        if strcmp(overlayMode,'raw_filtered')
+            h = plot(ax_raw1, tsec_raw, emg1_raw, '-', 'Color', color_emg1, ...
+                'DisplayName','EMG1 brut','Tag','rawOverlay');
+            setLineAlphaOrLighten(h, color_emg1, alpha_overlay);
+            plot(ax_raw1, tsec_raw, filteredSignal1, '-', 'Color', color_emg1, ...
+                'LineWidth',1.1,'DisplayName','EMG1 filtre','Tag','filteredOverlay');
+            applyAxisStyle(ax_raw1,'EMG1 brut + filtre', color_emg1, 'Activite (V)');
+        else
+            plot(ax_raw1, tsec_raw, emg1_raw, '-', 'Color', color_emg1);
+            h = plot(ax_raw1, tsec_raw, emg2_raw, '-', 'Color', color_emg2);
+            setLineAlphaOrLighten(h, color_emg2, alpha_overlay);
+            applyAxisStyle(ax_raw1,'EMG1 brut', color_emg1, 'Activite (V)');
+        end
         set(ax_raw1,'XLim',[tsec_raw(1) tsec_raw(end)]);
 
         cla(ax_raw2); hold(ax_raw2,'on');
-        plot(ax_raw2, tsec_raw, emg2_raw, '-', 'Color', color_emg2);
-        h = plot(ax_raw2, tsec_raw, emg1_raw, '-', 'Color', color_emg1);
-        setLineAlphaOrLighten(h, color_emg1, alpha_overlay);
-        applyAxisStyle(ax_raw2,'EMG2 brut', color_emg2, 'Activité (V)');
+        if strcmp(overlayMode,'raw_filtered')
+            h = plot(ax_raw2, tsec_raw, emg2_raw, '-', 'Color', color_emg2, ...
+                'DisplayName','EMG2 brut','Tag','rawOverlay');
+            setLineAlphaOrLighten(h, color_emg2, alpha_overlay);
+            plot(ax_raw2, tsec_raw, filteredSignal2, '-', 'Color', color_emg2, ...
+                'LineWidth',1.1,'DisplayName','EMG2 filtre','Tag','filteredOverlay');
+            applyAxisStyle(ax_raw2,'EMG2 brut + filtre', color_emg2, 'Activite (V)');
+        else
+            plot(ax_raw2, tsec_raw, emg2_raw, '-', 'Color', color_emg2);
+            h = plot(ax_raw2, tsec_raw, emg1_raw, '-', 'Color', color_emg1);
+            setLineAlphaOrLighten(h, color_emg1, alpha_overlay);
+            applyAxisStyle(ax_raw2,'EMG2 brut', color_emg2, 'Activite (V)');
+        end
         set(ax_raw2,'XLim',[tsec_raw(1) tsec_raw(end)]);
 
         cla(ax_filt1); hold(ax_filt1,'on');
         plot(ax_filt1, tsec_filt, filt1, '-', 'Color', color_emg1);
-        h = plot(ax_filt1, tsec_filt, filt2, '-', 'Color', color_emg2);
-        setLineAlphaOrLighten(h, color_emg2, alpha_overlay);
+        if strcmp(overlayMode,'comparison')
+            h = plot(ax_filt1, tsec_filt, filt2, '-', 'Color', color_emg2);
+            setLineAlphaOrLighten(h, color_emg2, alpha_overlay);
+        end
         styleEnvelopeAxis(ax_filt1, 1, color_emg1);
         set(ax_filt1,'XLim',[tsec_filt(1) tsec_filt(end)]);
 
         cla(ax_filt2); hold(ax_filt2,'on');
         plot(ax_filt2, tsec_filt, filt2, '-', 'Color', color_emg2);
-        h = plot(ax_filt2, tsec_filt, filt1, '-', 'Color', color_emg1);
-        setLineAlphaOrLighten(h, color_emg1, alpha_overlay);
+        if strcmp(overlayMode,'comparison')
+            h = plot(ax_filt2, tsec_filt, filt1, '-', 'Color', color_emg1);
+            setLineAlphaOrLighten(h, color_emg1, alpha_overlay);
+        end
         styleEnvelopeAxis(ax_filt2, 2, color_emg2);
         set(ax_filt2,'XLim',[tsec_filt(1) tsec_filt(end)]);
+
+        [freq1, psd1] = computePowerSpectrum(emg1_raw, Fs);
+        [freq2, psd2] = computePowerSpectrum(emg2_raw, Fs);
+        cla(ax_freq); hold(ax_freq,'on');
+        if strcmp(overlayMode,'raw_filtered')
+            h = plot(ax_freq,freq1,psd1,'-','Color',color_emg1,'DisplayName','EMG1 brut');
+            setLineAlphaOrLighten(h, color_emg1, alpha_overlay);
+            h = plot(ax_freq,freq2,psd2,'-','Color',color_emg2,'DisplayName','EMG2 brut');
+            setLineAlphaOrLighten(h, color_emg2, alpha_overlay);
+            [freqFilt1, psdFilt1] = computePowerSpectrum(filteredSignal1, Fs);
+            [freqFilt2, psdFilt2] = computePowerSpectrum(filteredSignal2, Fs);
+            plot(ax_freq,freqFilt1,psdFilt1,'-','Color',color_emg1, ...
+                'LineWidth',1.1,'DisplayName','EMG1 filtre','Tag','spectrumFiltered');
+            plot(ax_freq,freqFilt2,psdFilt2,'-','Color',color_emg2, ...
+                'LineWidth',1.1,'DisplayName','EMG2 filtre','Tag','spectrumFiltered');
+        else
+            plot(ax_freq,freq1,psd1,'-','Color',color_emg1,'DisplayName','EMG1');
+            plot(ax_freq,freq2,psd2,'-','Color',color_emg2,'DisplayName','EMG2');
+        end
+        title(ax_freq,'Analyse frequentielle');
+        xlabel(ax_freq,'Frequence (Hz)');
+        ylabel(ax_freq,'DSP (dB/Hz)');
+        xlim(ax_freq,[0 min(500,Fs/2)]);
+        grid(ax_freq,'on');
+        legend(ax_freq,'Location','best');
+
+        setappdata(f,'cursor_max_time',tsec_raw(end));
+        installPlaybackCursor();
+
+        if ~shouldStore
+            return
+        end
 
         rec_count = getappdata(f,'rec_count') + 1;
         setappdata(f,'rec_count',rec_count);
@@ -788,12 +1327,17 @@ function EMG_GUI_digilent()
         recs = getappdata(f,'recordings_raw');
         recs{rec_count} = rawBuf; %#ok<AGROW>
         setappdata(f,'recordings_raw',recs);
+        recTimes = getappdata(f,'recordings_time');
+        recTimes{rec_count} = timeBuf; %#ok<AGROW>
+        setappdata(f,'recordings_time',recTimes);
 
         assignin('base',sprintf('EMG_recording_raw_%02d',rec_count),rawBuf);
+        assignin('base',sprintf('EMG_recording_time_%02d',rec_count),timeBuf);
         assignin('base',sprintf('EMG1_filtered_%02d',rec_count),filt1);
         assignin('base',sprintf('EMG2_filtered_%02d',rec_count),filt2);
 
         assignin('base','EMG_data_raw',rawBuf);
+        assignin('base','EMG_time_s',timeBuf);
         assignin('base','EMG1_filtered',filt1);
         assignin('base','EMG2_filtered',filt2);
 
@@ -870,7 +1414,7 @@ function EMG_GUI_digilent()
                 tsec = (0:numel(buf)-1)/Fs;
                 set(hRaw,'XData',tsec,'YData',buf);
 
-                env = filterEMG(buf, Fs);
+                env = filterEMG(buf, Fs, getappdata(f,'notch_enabled'));
                 set(hFilt,'XData',tsec,'YData',env);
 
                 drawnow limitrate;
@@ -895,7 +1439,7 @@ function EMG_GUI_digilent()
             return
         end
 
-        envMVC = filterEMG(buf, Fs);
+        envMVC = filterEMG(buf, Fs, getappdata(f,'notch_enabled'));
         nTake = min(2000,numel(envMVC));
         topVals = maxk(envMVC,nTake);
         mvcVal = median(topVals);
@@ -1047,56 +1591,111 @@ end
 % =========================================================================
 % EMG FILTERING
 % =========================================================================
-function filtered = filterEMG(raw, Fs)
+function emg = preprocessEMG(raw, Fs, notchEnabled)
+    if nargin < 3
+        notchEnabled = true;
+    end
     raw = raw - mean(raw);
 
-    f0 = 60;
-    Q  = 2;
-    wo = f0/(Fs/2);
-    bw = wo/Q;
-
-    if exist('iirnotch','file')==2
-        [b,a] = iirnotch(wo,bw);
-        emg_notch = filtfilt(b,a,raw);
-    else
-        d = designfilt('bandstopiir', ...
-            'FilterOrder',2, ...
-            'HalfPowerFrequency1',f0-1.5, ...
-            'HalfPowerFrequency2',f0+1.5, ...
-            'SampleRate',Fs);
-        emg_notch = filtfilt(d,raw);
+    emg_notch = raw;
+    if notchEnabled
+        maxNotchFrequency = min(400,Fs/2-2);
+        notchFrequencies = 60:60:maxNotchFrequency;
+        halfWidthHz = 1;
+        for f0 = notchFrequencies
+            if exist('iirnotch','file') == 2
+                wo = f0/(Fs/2);
+                bw = (2*halfWidthHz)/(Fs/2);
+                [b,a] = iirnotch(wo,bw);
+                emg_notch = filtfilt(b,a,emg_notch);
+            else
+                d = designfilt('bandstopiir', ...
+                    'FilterOrder',2, ...
+                    'HalfPowerFrequency1',f0-halfWidthHz, ...
+                    'HalfPowerFrequency2',f0+halfWidthHz, ...
+                    'SampleRate',Fs);
+                emg_notch = filtfilt(d,emg_notch);
+            end
+        end
     end
 
     [b,a] = butter(4,[20 400]/(Fs/2),'bandpass');
     emg = filtfilt(b,a,emg_notch);
+end
 
+function filtered = filterEMG(raw, Fs, notchEnabled)
+    if nargin < 3
+        notchEnabled = true;
+    end
+    emg = preprocessEMG(raw, Fs, notchEnabled);
     filtered = sqrt(movmean(emg.^2,100));
+end
+
+function fitLiveYLimits(ax,data)
+    data = data(isfinite(data));
+    if isempty(data), return, end
+    low = min(data);
+    high = max(data);
+    span = high-low;
+    if span <= eps
+        span = max(abs(low),1) * 0.2;
+    end
+    padding = max(0.05*span,eps);
+    set(ax,'YLim',[low-padding high+padding]);
+end
+
+function [freq, psdDb] = computePowerSpectrum(raw, Fs)
+    x = double(raw(:));
+    x = x - mean(x);
+    if numel(x) < 2
+        freq = 0;
+        psdDb = NaN;
+        return
+    end
+
+    windowLength = min(numel(x), max(256,round(Fs)));
+    nfft = max(1024,2^nextpow2(windowLength));
+    if exist('pwelch','file') == 2 && windowLength >= 8
+        [psd, freq] = pwelch(x,windowLength,floor(windowLength/2),nfft,Fs);
+    else
+        spectrum = fft(x,nfft);
+        keep = 1:(floor(nfft/2)+1);
+        freq = (keep-1)' * Fs / nfft;
+        psd = abs(spectrum(keep)).^2 / (Fs*numel(x));
+        psd = psd(:);
+    end
+    psdDb = 10*log10(max(psd,eps));
 end
 
 % =========================================================================
 % EXPORTS
 % =========================================================================
-function exportGraphs(figHandle, ax_raw1,ax_raw2,ax_filt1,ax_filt2)
-    fig = figure('Visible','off','Position',[100,100,1200,800]);
-    subplot(2,2,1); copyobj(allchild(ax_raw1), gca);
-    title('EMG1 brut'); xlabel('Temps (s)'); ylabel('Activité (V)');
-    subplot(2,2,2); copyobj(allchild(ax_raw2), gca);
-    title('EMG2 brut'); xlabel('Temps (s)'); ylabel('Activité (V)');
+function exportGraphs(figHandle, ax_raw1,ax_raw2,ax_filt1,ax_filt2,ax_freq)
+    fig = figure('Visible','off','Position',[100,100,1200,1000]);
+    subplot(3,2,1); copyobj(allchild(ax_raw1), gca);
+    title(ax_raw1.Title.String); xlabel('Temps (s)'); ylabel(ax_raw1.YLabel.String);
+    subplot(3,2,2); copyobj(allchild(ax_raw2), gca);
+    title(ax_raw2.Title.String); xlabel('Temps (s)'); ylabel(ax_raw2.YLabel.String);
     mvc = getappdata(figHandle,'mvc_values');
-    subplot(2,2,3); copyobj(allchild(ax_filt1), gca);
+    subplot(3,2,3); copyobj(allchild(ax_filt1), gca);
     if ~isempty(mvc) && mvc(1)>0
         title('EMG1 enveloppe normalisee'); ylabel('Activation (%MVC)');
     else
         title('EMG1 enveloppe RMS'); ylabel('Enveloppe RMS (V)');
     end
     xlabel('Temps (s)');
-    subplot(2,2,4); copyobj(allchild(ax_filt2), gca);
+    subplot(3,2,4); copyobj(allchild(ax_filt2), gca);
     if ~isempty(mvc) && mvc(2)>0
         title('EMG2 enveloppe normalisee'); ylabel('Activation (%MVC)');
     else
         title('EMG2 enveloppe RMS'); ylabel('Enveloppe RMS (V)');
     end
     xlabel('Temps (s)');
+    subplot(3,2,[5 6]); copyobj(allchild(ax_freq), gca);
+    title('Analyse frequentielle'); xlabel('Frequence (Hz)'); ylabel('DSP (dB/Hz)');
+    xlim([0 min(500,getappdata(figHandle,'Fs')/2)]);
+    grid on;
+    legend(gca,'show','Location','best');
 
     [file,path] = uiputfile('*.png','Exporter les graphiques sous...');
     if ~isequal(file,0)
@@ -1113,11 +1712,12 @@ function exportCSV(figHandle)
         return
     end
     rawBuf = recs{end};
+    recTimes = getappdata(figHandle,'recordings_time');
     emg1_raw = rawBuf(:,1);
     emg2_raw = rawBuf(:,2);
 
-    filt1 = filterEMG(emg1_raw, Fs);
-    filt2 = filterEMG(emg2_raw, Fs);
+    filt1 = filterEMG(emg1_raw, Fs, getappdata(figHandle,'notch_enabled'));
+    filt2 = filterEMG(emg2_raw, Fs, getappdata(figHandle,'notch_enabled'));
 
     mvc = getappdata(figHandle,'mvc_values');
     if ~isempty(mvc)
@@ -1129,7 +1729,11 @@ function exportCSV(figHandle)
     env2Name = 'emg2_env_V';
     if ~isempty(mvc) && numel(mvc)>=1 && mvc(1)>0, env1Name = 'emg1_env_pctMVC'; end
     if ~isempty(mvc) && numel(mvc)>=2 && mvc(2)>0, env2Name = 'emg2_env_pctMVC'; end
-    t = (0:size(rawBuf,1)-1)'/Fs;
+    if isempty(recTimes) || numel(recTimes) < numel(recs) || isempty(recTimes{end})
+        t = (0:size(rawBuf,1)-1)'/Fs;
+    else
+        t = recTimes{end};
+    end
     T = table(t, emg1_raw, emg2_raw, filt1, filt2, ...
         'VariableNames', {'time_s','emg1_raw_V','emg2_raw_V',env1Name,env2Name});
 
@@ -1213,7 +1817,7 @@ function updateSignalQuality(figHandle, rawBuf, Fs, mvcValue, channelNumbers)
     satMask = any(abs(rawBuf) >= 4.90, 2);
     satPct  = 100 * (sum(satMask) / size(rawBuf,1));
     if satPct > 0.5
-        messages{end+1} = sprintf('saturation %.1f%%',satPct); %#ok<AGROW>
+        messages{end+1} = sprintf('saturation %.1f%% : reduire amplification/gain',satPct); %#ok<AGROW>
     end
 
     for channel = 1:size(rawBuf,2)
@@ -1224,7 +1828,7 @@ function updateSignalQuality(figHandle, rawBuf, Fs, mvcValue, channelNumbers)
         end
         x = rawBuf(:,channel) - mean(rawBuf(:,channel));
         if std(x) < 0.005
-            messages{end+1} = sprintf('EMG%d tres faible',channelNumber); %#ok<AGROW>
+            messages{end+1} = sprintf('EMG%d faible : verifier electrodes et cables',channelNumber); %#ok<AGROW>
             continue
         end
         if numel(x) >= Fs
@@ -1234,13 +1838,13 @@ function updateSignalQuality(figHandle, rawBuf, Fs, mvcValue, channelNumbers)
             bandPower = sum(power(freq>=20 & freq<=400));
             linePower = sum(power(freq>=59 & freq<=61));
             if bandPower > 0 && linePower / bandPower > 0.25
-                messages{end+1} = sprintf('EMG%d bruit 60 Hz eleve',channelNumber); %#ok<AGROW>
+                messages{end+1} = sprintf('EMG%d bruit 60 Hz : verifier masse et alimentation',channelNumber); %#ok<AGROW>
             end
         end
     end
 
     if ~isempty(mvcValue) && mvcValue < 0.01
-        messages{end+1} = 'MVC trop faible'; %#ok<AGROW>
+        messages{end+1} = 'MVC faible : refaire une contraction maximale'; %#ok<AGROW>
     end
 
     qualityTxt = getappdata(figHandle,'qualityTxt');
