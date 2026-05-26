@@ -105,15 +105,12 @@ function testMvcDynamicScaleTracksSmallSignals(testCase)
         'L''enveloppe MVC doit rester lisible pour une faible amplitude.');
 end
 
-function testPlacementPreviewCanBeDisabled(testCase)
+function testRecordingNoLongerWaitsForPlacementCountdown(testCase)
     f = testCase.TestData.figure;
     previewCheck = findobj(f,'Tag','previewCheck');
 
-    testCase.verifyNotEmpty(previewCheck);
-    testCase.verifyEqual(previewCheck.Value,1);
-    previewCheck.Value = 0;
-    previewCheck.Callback(previewCheck,[]);
-    testCase.verifyFalse(getappdata(f,'video_preview_enabled'));
+    testCase.verifyEmpty(previewCheck, ...
+        'L''interface ne doit plus imposer un compte a rebours camera.');
 end
 
 function testSignalQualitySuggestsReducingGainOnSaturation(testCase)
@@ -188,6 +185,38 @@ function testRawFilteredModeIsOnlyShownAfterAcquisition(testCase)
 
     testCase.verifyEmpty(findobj(f,'Tag','filteredOverlay'), ...
         'La superposition brut/filtre ne doit pas etre affichee en direct.');
+end
+
+function testComparisonModeKeepsTransparentOverlaysAndNamedCursor(testCase)
+    f = testCase.TestData.figure;
+    hooks = getappdata(f,'testHooks');
+    Fs = getappdata(f,'Fs');
+    t = (0:Fs-1)'/Fs;
+    raw = [sin(2*pi*40*t) 2*sin(2*pi*60*t)];
+
+    hooks.plotFinalAndStore(raw,t,false);
+
+    testCase.verifyNumElements(findobj(f,'Tag','comparisonOverlay'),4);
+    cursor = findobj(f,'Tag','playbackCursor');
+    testCase.verifyNumElements(cursor,4);
+    testCase.verifyEqual(cursor(1).DisplayName,'Barre du temps');
+end
+
+function testPostProcessingScaleIncludesBothComparedSignals(testCase)
+    f = testCase.TestData.figure;
+    hooks = getappdata(f,'testHooks');
+    Fs = getappdata(f,'Fs');
+    raw = zeros(Fs,2);
+    raw(round(0.3*Fs),1) = 1.8;
+    raw(round(0.7*Fs),2) = -1.5;
+
+    hooks.plotFinalAndStore(raw,(0:Fs-1)'/Fs,false);
+    axRaw1 = findobj(f,'Tag','ax_raw1');
+    axRaw2 = findobj(f,'Tag','ax_raw2');
+
+    testCase.verifyGreaterThan(axRaw1.YLim(2),1.8);
+    testCase.verifyLessThan(axRaw1.YLim(1),-1.5);
+    testCase.verifyEqual(axRaw1.YLim,axRaw2.YLim,'AbsTol',1e-12);
 end
 
 function testVideoTimeSelectsNearestFrame(testCase)

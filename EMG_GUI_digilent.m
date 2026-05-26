@@ -18,7 +18,7 @@ function f = EMG_GUI_digilent()
     %% Colours & constants
     color_emg1 = [0 0.4470 0.7410];
     color_emg2 = [0.8500 0.3250 0.0980];
-    alpha_overlay = 0.20;
+    alpha_overlay = 0.35;
 
     Fs = 2000;
     boardNum = 0;
@@ -77,12 +77,11 @@ function f = EMG_GUI_digilent()
     setappdata(f,'video_trigger_clock',[]);
     setappdata(f,'video_capture_start_time',0);
     setappdata(f,'video_capture_stop_time',0);
-    setappdata(f,'video_preview_seconds',5);
-    setappdata(f,'video_preview_enabled',true);
     setappdata(f,'video_capture_fps',5);
     setappdata(f,'video_next_capture_time',0);
     setappdata(f,'video_display_decimation',2);
     setappdata(f,'video_playback_target_fps',5);
+    setappdata(f,'video_live_preview_enabled',true);
     setappdata(f,'video_playing',false);
     setappdata(f,'playback_cursor_lines',[]);
     setappdata(f,'cursor_max_time',0);
@@ -205,12 +204,6 @@ function f = EMG_GUI_digilent()
             'FontSize',10,'Value',2,'Tag','displayMode', ...
             'Callback',@(src,~) changeDisplayMode(src));
         setappdata(f,'displayMode',displayMode);
-
-        previewCheck = uicontrol(f,'Style','checkbox','String','Placement camera 5 s', ...
-            'Units','normalized','Position',[0.72,0.36,0.25,0.026], ...
-            'FontSize',9,'Value',1,'Tag','previewCheck', ...
-            'Callback',@(src,~) setappdata(f,'video_preview_enabled',logical(src.Value)));
-        setappdata(f,'previewCheck',previewCheck);
 
         ax_freq = axes(f,'Units','normalized','Position',[0.72,0.14,0.25,0.18], ...
             'Tag','ax_freq');
@@ -452,15 +445,16 @@ function f = EMG_GUI_digilent()
         setappdata(f,'video_capture_stop_time',0);
         setappdata(f,'video_input',[]);
         setappdata(f,'video_backend','none');
+        setappdata(f,'video_live_preview_enabled',true);
         videoSlider = getappdata(f,'videoSlider');
         videoPlay = getappdata(f,'videoPlay');
         set(videoSlider,'Enable','off','Value',1);
         set(videoPlay,'Enable','off','Value',0,'String','▶','TooltipString','Lire la video');
         cam = [];
         hasVideo = false;
-        if ~getappdata(f,'video_preview_enabled') && hasParallelVideoAdaptor()
+        if hasParallelVideoAdaptor()
             setappdata(f,'video_backend','imaq');
-            set(getappdata(f,'videoTxt'),'String','Video : capture parallele sans apercu');
+            set(getappdata(f,'videoTxt'),'String','Video : capture parallele prete');
             hasVideo = true;
             return
         end
@@ -475,30 +469,10 @@ function f = EMG_GUI_digilent()
             cam = webcam;
             setappdata(f,'video_camera',cam);
             setappdata(f,'video_writer',[]);
-            previewSeconds = 0;
-            if getappdata(f,'video_preview_enabled')
-                previewSeconds = getappdata(f,'video_preview_seconds');
-            end
-            countdown = tic;
-            while ishandle(f) && getappdata(f,'isPreparing') && toc(countdown) < previewSeconds
-                frame = snapshot(cam);
-                showVideoFrame(frame);
-                remaining = max(0,ceil(previewSeconds - toc(countdown)));
-                set(getappdata(f,'videoTxt'),'String', ...
-                    sprintf('Positionnement : depart dans %d s',remaining));
-                setStatus('Placez-vous devant la camera; depart automatique imminent.', [0.2 0.2 0.2]);
-                drawnow limitrate;
-                pause(0.05);
-            end
             hasVideo = ishandle(f);
-            if hasVideo && hasParallelVideoAdaptor()
-                setappdata(f,'video_camera',[]);
-                clear cam
-                setappdata(f,'video_backend','imaq');
-                set(getappdata(f,'videoTxt'),'String','Video : capture parallele prete');
-            else
+            if hasVideo
                 setappdata(f,'video_backend','webcam');
-                set(getappdata(f,'videoTxt'),'String','Video : repli webcam, risque retard EMG');
+                set(getappdata(f,'videoTxt'),'String','Video : webcam prete');
             end
         catch ME
             clear cam
@@ -569,6 +543,7 @@ function f = EMG_GUI_digilent()
                 setappdata(f,'video_writer',[]);
                 setappdata(f,'video_file',filename);
                 setappdata(f,'video_trigger_clock',tic);
+                setappdata(f,'video_next_capture_time',0);
                 start(vid);
                 setappdata(f,'video_capture_start_time',toc(getappdata(f,'video_trigger_clock')));
                 set(getappdata(f,'videoTxt'),'String','Video : capture parallele en cours');
@@ -598,6 +573,26 @@ function f = EMG_GUI_digilent()
 
     function captureVideoFrame()
         if strcmp(getappdata(f,'video_backend'),'imaq')
+            if ~getappdata(f,'mcc_continuous_active'), return, end
+            if ~getappdata(f,'video_live_preview_enabled'), return, end
+            vid = getappdata(f,'video_input');
+            triggerClock = getappdata(f,'video_trigger_clock');
+            if isempty(vid) || isempty(triggerClock), return, end
+            nowTime = toc(triggerClock);
+            if nowTime < getappdata(f,'video_next_capture_time'), return, end
+            try
+                frame = peekdata(vid,1);
+                if ~isempty(frame)
+                    step = max(1,round(getappdata(f,'video_display_decimation')));
+                    showVideoFrame(frame(1:step:end,1:step:end,:));
+                end
+                setappdata(f,'video_next_capture_time', ...
+                    nowTime + 1/max(getappdata(f,'video_playback_target_fps'),1));
+            catch ME
+                setappdata(f,'video_live_preview_enabled',false);
+                setStatus('Apercu video indisponible; enregistrement maintenu.', [0.75 0.35 0]);
+                disp(getReport(ME,'extended'));
+            end
             return
         end
         cam = getappdata(f,'video_camera');
@@ -612,6 +607,10 @@ function f = EMG_GUI_digilent()
             frame = snapshot(cam);
             frameTime = 0.5 * (beforeSnapshot + toc(triggerClock));
             writeVideo(writer,frame);
+            if getappdata(f,'mcc_continuous_active') || getappdata(f,'test_mode')
+                step = max(1,round(getappdata(f,'video_display_decimation')));
+                showVideoFrame(frame(1:step:end,1:step:end,:));
+            end
             setappdata(f,'video_frame_count',getappdata(f,'video_frame_count') + 1);
             frameTimes = getappdata(f,'video_frame_times');
             setappdata(f,'video_frame_times',[frameTimes frameTime]);
@@ -839,6 +838,7 @@ function f = EMG_GUI_digilent()
             yl = ylim(ax);
             cursorLines(k) = line(ax,[0 0],yl,'Color',[0.85 0.10 0.10], ...
                 'LineWidth',1.5,'HitTest','on','PickableParts','all', ...
+                'DisplayName','Barre du temps','Tag','playbackCursor', ...
                 'ButtonDownFcn',@startCursorDrag);
         end
         setappdata(f,'playback_cursor_lines',cursorLines);
@@ -1444,8 +1444,10 @@ function f = EMG_GUI_digilent()
             applyAxisStyle(ax_raw1,'EMG1 brut + filtre', color_emg1, 'Activite (V)');
             legend(ax_raw1,'show','Location','best');
         else
-            plot(ax_raw1, tsec_raw, emg1_raw, '-', 'Color', color_emg1);
-            h = plot(ax_raw1, tsec_raw, emg2_raw, '-', 'Color', color_emg2);
+            plot(ax_raw1, tsec_raw, emg1_raw, '-', 'Color', color_emg1, ...
+                'DisplayName','EMG1');
+            h = plot(ax_raw1, tsec_raw, emg2_raw, '-', 'Color', color_emg2, ...
+                'DisplayName','EMG2 superpose','Tag','comparisonOverlay');
             setLineAlphaOrLighten(h, color_emg2, alpha_overlay);
             applyAxisStyle(ax_raw1,'EMG1 brut', color_emg1, 'Activite (V)');
         end
@@ -1461,30 +1463,48 @@ function f = EMG_GUI_digilent()
             applyAxisStyle(ax_raw2,'EMG2 brut + filtre', color_emg2, 'Activite (V)');
             legend(ax_raw2,'show','Location','best');
         else
-            plot(ax_raw2, tsec_raw, emg2_raw, '-', 'Color', color_emg2);
-            h = plot(ax_raw2, tsec_raw, emg1_raw, '-', 'Color', color_emg1);
+            plot(ax_raw2, tsec_raw, emg2_raw, '-', 'Color', color_emg2, ...
+                'DisplayName','EMG2');
+            h = plot(ax_raw2, tsec_raw, emg1_raw, '-', 'Color', color_emg1, ...
+                'DisplayName','EMG1 superpose','Tag','comparisonOverlay');
             setLineAlphaOrLighten(h, color_emg1, alpha_overlay);
             applyAxisStyle(ax_raw2,'EMG2 brut', color_emg2, 'Activite (V)');
         end
         set(ax_raw2,'XLim',[tsec_raw(1) tsec_raw(end)]);
 
         cla(ax_filt1); hold(ax_filt1,'on');
-        plot(ax_filt1, tsec_filt, filt1, '-', 'Color', color_emg1);
+        plot(ax_filt1, tsec_filt, filt1, '-', 'Color', color_emg1, ...
+            'DisplayName','EMG1');
         if strcmp(overlayMode,'comparison')
-            h = plot(ax_filt1, tsec_filt, filt2, '-', 'Color', color_emg2);
+            h = plot(ax_filt1, tsec_filt, filt2, '-', 'Color', color_emg2, ...
+                'DisplayName','EMG2 superpose','Tag','comparisonOverlay');
             setLineAlphaOrLighten(h, color_emg2, alpha_overlay);
         end
         styleEnvelopeAxis(ax_filt1, 1, color_emg1);
         set(ax_filt1,'XLim',[tsec_filt(1) tsec_filt(end)]);
 
         cla(ax_filt2); hold(ax_filt2,'on');
-        plot(ax_filt2, tsec_filt, filt2, '-', 'Color', color_emg2);
+        plot(ax_filt2, tsec_filt, filt2, '-', 'Color', color_emg2, ...
+            'DisplayName','EMG2');
         if strcmp(overlayMode,'comparison')
-            h = plot(ax_filt2, tsec_filt, filt1, '-', 'Color', color_emg1);
+            h = plot(ax_filt2, tsec_filt, filt1, '-', 'Color', color_emg1, ...
+                'DisplayName','EMG1 superpose','Tag','comparisonOverlay');
             setLineAlphaOrLighten(h, color_emg1, alpha_overlay);
         end
         styleEnvelopeAxis(ax_filt2, 2, color_emg2);
         set(ax_filt2,'XLim',[tsec_filt(1) tsec_filt(end)]);
+
+        if strcmp(overlayMode,'comparison')
+            fitLiveYLimits(ax_raw1,[emg1_raw; emg2_raw]);
+            fitLiveYLimits(ax_raw2,[emg1_raw; emg2_raw]);
+            fitLiveYLimits(ax_filt1,[filt1; filt2]);
+            fitLiveYLimits(ax_filt2,[filt1; filt2]);
+        else
+            fitLiveYLimits(ax_raw1,[emg1_raw; filteredSignal1]);
+            fitLiveYLimits(ax_raw2,[emg2_raw; filteredSignal2]);
+            fitLiveYLimits(ax_filt1,filt1);
+            fitLiveYLimits(ax_filt2,filt2);
+        end
 
         [freq1, psd1] = computePowerSpectrum(emg1_raw, Fs);
         [freq2, psd2] = computePowerSpectrum(emg2_raw, Fs);

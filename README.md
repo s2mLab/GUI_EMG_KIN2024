@@ -56,9 +56,11 @@ Elle demarre en mode materiel; la case `Mode TEST (simulation)` en bas a
 gauche permet d'activer explicitement les signaux simules.
 Le bouton `Bilan installations` evalue au demarrage les composants disponibles
 et indique les toolboxes, support packages ou pilotes MCC a installer.
-Elle propose un positionnement webcam de `5 s`, puis déclenche ensemble la
-vidéo et l'EMG. La relecture est liée aux graphiques par un curseur temporel
-et un panneau compare le contenu fréquentiel des deux signaux. Un checkbox
+Elle déclenche ensemble la vidéo et l'EMG sans attente préalable. Lorsque
+l'acquisition analogique continue MCC est active, un apercu video allege est
+affiche pendant l'enregistrement sans interrompre l'echantillonnage. La
+relecture est liée aux graphiques par un curseur temporel nommé `Barre du
+temps` et un panneau compare le contenu fréquentiel des deux signaux. Un checkbox
 permet d'activer ou désactiver les notch filters de `60 Hz` et de ses
 harmoniques (`120` à `360 Hz`).
 
@@ -84,7 +86,7 @@ l'ouverture; les acquisitions suivantes utilisent alors les signaux simules.
 
 ### Webcam facultative
 
-Pour activer le positionnement et l'enregistrement vidéo, installer
+Pour activer l'enregistrement et l'apercu vidéo, installer
 **MATLAB Support Package for USB Webcams** :
 
 1. Dans MATLAB, ouvrir `Home > Add-Ons > Get Hardware Support Packages`.
@@ -173,7 +175,8 @@ calibration du canal.
 
 Dans l'application MATLAB, le menu `Apres Stop` propose deux lectures :
 
-- `EMG1 + EMG2` conserve la comparaison des deux signaux;
+- `EMG1 + EMG2` conserve la comparaison des deux signaux, avec le second
+  signal affiche en transparence sur chaque graphique;
 - `Brut + filtre` superpose, pour chaque canal, le signal brut transparent et
   le signal passe-bande/notch filtre en volts. Dans ce mode, l'analyse
   frequentielle affiche egalement les spectres filtres des deux canaux.
@@ -244,15 +247,13 @@ zéros.
 
 ### Capture vidéo
 
-Dans l'application MATLAB, le clic sur `Enregistrer` affiche d'abord la camera
-pendant `5 s` pour permettre le placement lorsque `Placement camera 5 s` est
-coche. Cette attente est intentionnelle; decocher la case permet un depart
-immediat lors des essais suivants. A la fin du compte a rebours,
-l'EMG et la vidéo sont déclenchés depuis une horloge commune. La vidéo n'est
-pas redessinée pendant l'acquisition afin de préserver les ressources. Après
-`Stop`, le curseur vertical des graphiques et le lecteur vidéo utilisent les
-horodatages capturés. Si aucune webcam n'est accessible, l'enregistrement EMG
-continue sans vidéo et un message l'indique.
+Dans l'application MATLAB, le clic sur `Enregistrer` demarre immediatement
+l'EMG et la video depuis une horloge commune. Lorsque le buffer analogique
+continu MCC est actif, la video est egalement affichee en direct a cadence
+reduite. Cet affichage ne pilote pas l'acquisition analogique. Apres `Stop`,
+la `Barre du temps` des graphiques et le lecteur video utilisent les
+horodatages captures. Si aucune webcam n'est accessible, l'enregistrement EMG
+continue sans video et un message l'indique.
 
 - Python : la capture utilise `opencv`, inclus dans `environment.yml`.
 - MATLAB : la capture utilise `webcam` et nécessite le support package
@@ -260,9 +261,10 @@ continue sans vidéo et un message l'indique.
 - MATLAB : l'acquisition vidéo réellement indépendante de la boucle EMG
   nécessite `Image Acquisition Toolbox` et l'adaptateur `winvideo`.
 - Avec `winvideo`, la video est journalisee par `videoinput` en parallele de
-  la boucle EMG. En repli `webcam`, les images sont prises dans la boucle
-  d'acquisition : il ne s'agit pas de deux threads independants et des
-  retards peuvent apparaître.
+  la boucle EMG; seul un apercu decime est lu pour l'affichage en direct.
+  En repli `webcam`, les images sont prises dans la boucle d'interface. La
+  protection contre les trous analogiques depend alors de l'activation du
+  scan MCC continu.
 - La synchronisation MATLAB repose sur les horodatages logiciels de capture;
   elle améliore fortement l'alignement pédagogique, mais ne remplace pas un
   déclencheur matériel pour une analyse biomécanique de précision.
