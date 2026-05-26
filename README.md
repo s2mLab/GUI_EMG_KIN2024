@@ -181,6 +181,9 @@ Dans l'application MATLAB, le menu `Apres Stop` propose deux lectures :
 La superposition est volontairement reservee au post-traitement, apres
 `Stop`. Pendant l'acquisition, chaque graphique affiche uniquement son canal
 afin de limiter le travail graphique et les risques de retard.
+Lorsque `Notch 60 Hz + harmoniques` est (de)coche apres un essai, les courbes
+filtrees et le spectre filtre en mode `Brut + filtre` sont recalcules
+immediatement a partir du dernier enregistrement affiche.
 
 La ligne `Qualite` associe les problemes detectes a une action pratique :
 saturation -> reduire l'amplification ou le gain; signal faible -> verifier

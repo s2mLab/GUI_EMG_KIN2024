@@ -43,6 +43,8 @@ function f = EMG_GUI_digilent()
     setappdata(f,'recordings_time',{});
     setappdata(f,'rawBuf',[]);
     setappdata(f,'timeBuf',[]);
+    setappdata(f,'last_plotted_raw',[]);
+    setappdata(f,'last_plotted_time',[]);
     setappdata(f,'sampleIdx',0);
     setappdata(f,'test_mode',false);
     setappdata(f,'guided_mode',true);
@@ -505,6 +507,7 @@ function f = EMG_GUI_digilent()
         else
             setStatus('Filtre notch desactive : bruit secteur conserve.', [0.75 0.35 0]);
         end
+        refreshLastProcessedView();
     end
 
     function changeDisplayMode(src)
@@ -515,9 +518,14 @@ function f = EMG_GUI_digilent()
             setappdata(f,'display_overlay_mode','comparison');
             setStatus('Affichage : comparaison EMG1 et EMG2.', [0.2 0.2 0.2]);
         end
-        rawBuf = getappdata(f,'rawBuf');
-        timeBuf = getappdata(f,'timeBuf');
-        if ~isempty(rawBuf) && ~isempty(timeBuf) && ~getappdata(f,'isRecording')
+        refreshLastProcessedView();
+    end
+
+    function refreshLastProcessedView()
+        if getappdata(f,'isRecording'), return, end
+        rawBuf = getappdata(f,'last_plotted_raw');
+        timeBuf = getappdata(f,'last_plotted_time');
+        if ~isempty(rawBuf) && ~isempty(timeBuf)
             plotFinalAndStore(rawBuf,timeBuf,false);
         end
     end
@@ -1240,6 +1248,8 @@ function f = EMG_GUI_digilent()
         end
         Fs = getappdata(f,'Fs');
         mvc = getappdata(f,'mvc_values');
+        setappdata(f,'last_plotted_raw',rawBuf);
+        setappdata(f,'last_plotted_time',timeBuf);
 
         emg1_raw = rawBuf(:,1);
         emg2_raw = rawBuf(:,2);

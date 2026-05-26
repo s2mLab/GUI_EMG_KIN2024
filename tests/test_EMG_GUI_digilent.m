@@ -231,6 +231,32 @@ function testNotchFilterAttenuatesMainsHarmonics(testCase)
         'Le notch ne doit pas supprimer une composante proche non harmonique.');
 end
 
+function testNotchToggleRefreshesFilteredFrequencyView(testCase)
+    f = testCase.TestData.figure;
+    hooks = getappdata(f,'testHooks');
+    Fs = getappdata(f,'Fs');
+    t = (0:4*Fs-1)'/Fs;
+    raw = [sin(2*pi*60*t) sin(2*pi*60*t)];
+    displayMode = findobj(f,'Tag','displayMode');
+    notchCheck = findobj(f,'Tag','notchCheck');
+
+    displayMode.Value = 1;
+    displayMode.Callback(displayMode,[]);
+    notchCheck.Value = 0;
+    notchCheck.Callback(notchCheck,[]);
+    hooks.plotFinalAndStore(raw,t,false);
+    before = findobj(f,'Tag','spectrumFiltered');
+    beforePeak = max(before(1).YData);
+
+    notchCheck.Value = 1;
+    notchCheck.Callback(notchCheck,[]);
+    after = findobj(f,'Tag','spectrumFiltered');
+    afterPeak = max(after(1).YData);
+
+    testCase.verifyLessThan(afterPeak,beforePeak-3, ...
+        'Le changement notch doit recalculer le spectre filtre affiche.');
+end
+
 function bounds = renderedBounds(ax)
     pos = ax.Position;
     inset = ax.TightInset;
