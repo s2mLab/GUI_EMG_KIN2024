@@ -82,6 +82,17 @@ function testSimulationModeDefaultsOffAndIsAtBottomLeft(testCase)
     testCase.verifyLessThan(testCheck.Position(2),0.10);
 end
 
+function testPlacementPreviewCanBeDisabled(testCase)
+    f = testCase.TestData.figure;
+    previewCheck = findobj(f,'Tag','previewCheck');
+
+    testCase.verifyNotEmpty(previewCheck);
+    testCase.verifyEqual(previewCheck.Value,1);
+    previewCheck.Value = 0;
+    previewCheck.Callback(previewCheck,[]);
+    testCase.verifyFalse(getappdata(f,'video_preview_enabled'));
+end
+
 function testSignalQualitySuggestsReducingGainOnSaturation(testCase)
     f = testCase.TestData.figure;
     hooks = getappdata(f,'testHooks');
@@ -141,6 +152,44 @@ function testRawFilteredModeOverlaysFilteredSignalsAndSpectra(testCase)
     testCase.verifyEqual(getappdata(f,'display_overlay_mode'),'raw_filtered');
     testCase.verifyNumElements(findobj(f,'Tag','filteredOverlay'),2);
     testCase.verifyNumElements(findobj(f,'Tag','spectrumFiltered'),2);
+end
+
+function testRawFilteredModeIsOnlyShownAfterAcquisition(testCase)
+    f = testCase.TestData.figure;
+    hooks = getappdata(f,'testHooks');
+    displayMode = findobj(f,'Tag','displayMode');
+
+    displayMode.Value = 1;
+    displayMode.Callback(displayMode,[]);
+    hooks.resetAllAxes('recording');
+
+    testCase.verifyEmpty(findobj(f,'Tag','filteredOverlay'), ...
+        'La superposition brut/filtre ne doit pas etre affichee en direct.');
+end
+
+function testVideoTimeSelectsNearestFrame(testCase)
+    f = testCase.TestData.figure;
+    hooks = getappdata(f,'testHooks');
+    slider = findobj(f,'Tag','videoSlider');
+
+    setappdata(f,'video_frame_times',[0 0.2 0.4 0.6]);
+    hooks.setSliderToTime(slider,0.36);
+
+    testCase.verifyEqual(slider.Value,3);
+end
+
+function testAcquisitionTimingDelayAddsActionableWarning(testCase)
+    f = testCase.TestData.figure;
+    hooks = getappdata(f,'testHooks');
+
+    setappdata(f,'last_block_start_time',[]);
+    hooks.updateAcquisitionTiming(0,0.1);
+    hooks.updateAcquisitionTiming(0.15,0.1);
+    hooks.updateSignalQuality(randn(2000,2),[],[]);
+    qualityText = findobj(f,'Tag','qualityTxt').String;
+
+    testCase.verifyTrue(contains(qualityText,'Retard acquisition'));
+    testCase.verifyTrue(contains(qualityText,'video parallele recommandee'));
 end
 
 function testFrequencySpectrumFindsInjectedFrequencies(testCase)

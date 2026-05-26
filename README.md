@@ -171,12 +171,16 @@ Dans les deux versions, la courbe d'enveloppe est calculée après rejet de
 L'axe reste en volts avant une MVC valide et passe en `%MVC` uniquement après
 calibration du canal.
 
-Dans l'application MATLAB, le menu `Affichage` propose deux lectures :
+Dans l'application MATLAB, le menu `Apres Stop` propose deux lectures :
 
 - `EMG1 + EMG2` conserve la comparaison des deux signaux;
 - `Brut + filtre` superpose, pour chaque canal, le signal brut transparent et
   le signal passe-bande/notch filtre en volts. Dans ce mode, l'analyse
   frequentielle affiche egalement les spectres filtres des deux canaux.
+
+La superposition est volontairement reservee au post-traitement, apres
+`Stop`. Pendant l'acquisition, chaque graphique affiche uniquement son canal
+afin de limiter le travail graphique et les risques de retard.
 
 La ligne `Qualite` associe les problemes detectes a une action pratique :
 saturation -> reduire l'amplification ou le gain; signal faible -> verifier
@@ -237,8 +241,10 @@ zéros.
 
 ### Capture vidéo
 
-Dans l'application MATLAB, le clic sur `Enregistrer` affiche d'abord la caméra
-pendant `5 s` pour permettre le placement. À la fin du compte à rebours,
+Dans l'application MATLAB, le clic sur `Enregistrer` affiche d'abord la camera
+pendant `5 s` pour permettre le placement lorsque `Placement camera 5 s` est
+coche. Cette attente est intentionnelle; decocher la case permet un depart
+immediat lors des essais suivants. A la fin du compte a rebours,
 l'EMG et la vidéo sont déclenchés depuis une horloge commune. La vidéo n'est
 pas redessinée pendant l'acquisition afin de préserver les ressources. Après
 `Stop`, le curseur vertical des graphiques et le lecteur vidéo utilisent les
@@ -250,6 +256,10 @@ continue sans vidéo et un message l'indique.
   **MATLAB Support Package for USB Webcams**.
 - MATLAB : l'acquisition vidéo réellement indépendante de la boucle EMG
   nécessite `Image Acquisition Toolbox` et l'adaptateur `winvideo`.
+- Avec `winvideo`, la video est journalisee par `videoinput` en parallele de
+  la boucle EMG. En repli `webcam`, les images sont prises dans la boucle
+  d'acquisition : il ne s'agit pas de deux threads independants et des
+  retards peuvent apparaître.
 - La synchronisation MATLAB repose sur les horodatages logiciels de capture;
   elle améliore fortement l'alignement pédagogique, mais ne remplace pas un
   déclencheur matériel pour une analyse biomécanique de précision.
@@ -362,6 +372,10 @@ Le CSV contient les colonnes suivantes :
 - La version MATLAB horodate les images et les blocs EMG à partir d'un départ
   logiciel commun; une synchronisation matérielle reste nécessaire pour une
   mesure cinématique image par image.
+- L'acquisition analogique MATLAB utilise actuellement des scans successifs,
+  pas un buffer continu en arriere-plan. L'interface signale un retard de
+  bloc superieur a `20 ms`; pour reduire ce risque, utiliser `winvideo` ou
+  enregistrer sans video de repli `webcam`.
 - Les scripts `test_*.py` interrogent le matériel directement et ne sont pas
   des tests automatisés exécutables sans carte MCC.
 
