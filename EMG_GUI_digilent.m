@@ -103,6 +103,7 @@ function f = EMG_GUI_digilent()
         'dependencyReport',@buildDependencyReport, ...
         'setSliderToTime',@setSliderToTime, ...
         'synchronizeVideoFrameTimes',@synchronizeVideoFrameTimes, ...
+        'overlayAlphaForDuration',@overlayAlphaForDuration, ...
         'fitLiveYLimits',@fitLiveYLimits, ...
         'resetAllAxes',@resetAllAxes, ...
         'updateAcquisitionTiming',@updateAcquisitionTiming));
@@ -536,7 +537,9 @@ function f = EMG_GUI_digilent()
                 writer = VideoWriter(filename,'Motion JPEG AVI');
                 writer.FrameRate = getappdata(f,'video_capture_fps');
                 vid = videoinput('winvideo',1);
-                vid.LoggingMode = 'disk';
+                % Keep a bounded memory stream for the live monitor while
+                % DiskLogger independently preserves the complete video.
+                vid.LoggingMode = 'disk&memory';
                 vid.FramesPerTrigger = Inf;
                 vid.DiskLogger = writer;
                 setappdata(f,'video_input',vid);
@@ -581,8 +584,10 @@ function f = EMG_GUI_digilent()
             nowTime = toc(triggerClock);
             if nowTime < getappdata(f,'video_next_capture_time'), return, end
             try
-                frame = peekdata(vid,1);
-                if ~isempty(frame)
+                available = double(vid.FramesAvailable);
+                if available > 0
+                    frames = getdata(vid,available);
+                    frame = frames(:,:,:,end);
                     step = max(1,round(getappdata(f,'video_display_decimation')));
                     showVideoFrame(frame(1:step:end,1:step:end,:));
                 end
@@ -916,6 +921,18 @@ function f = EMG_GUI_digilent()
             % playback is intentionally reduced. Use the shared recording
             % clock, not the requested preview rate, for EMG alignment.
             frameTimes = linspace(startTime,stopTime,frameCount);
+        end
+    end
+
+    function alpha = overlayAlphaForDuration(durationSeconds)
+        baseAlpha = getappdata(f,'alpha_overlay');
+        durationSeconds = max(0,double(durationSeconds));
+        if durationSeconds <= 10
+            alpha = baseAlpha;
+        else
+            % Long recordings draw many points: reduce opacity in inverse
+            % proportion to duration so the reference signal remains visible.
+            alpha = max(0.06,baseAlpha * 10 / durationSeconds);
         end
     end
 
@@ -1433,12 +1450,13 @@ function f = EMG_GUI_digilent()
         ax_filt2 = getappdata(f,'ax_filt2');
         ax_freq  = getappdata(f,'ax_freq');
         overlayMode = getappdata(f,'display_overlay_mode');
+        overlayAlpha = overlayAlphaForDuration(tsec_raw(end)-tsec_raw(1));
 
         cla(ax_raw1); hold(ax_raw1,'on');
         if strcmp(overlayMode,'raw_filtered')
             h = plot(ax_raw1, tsec_raw, emg1_raw, '-', 'Color', color_emg1, ...
                 'DisplayName','EMG1 brut','Tag','rawOverlay');
-            setLineAlphaOrLighten(h, color_emg1, alpha_overlay);
+            setLineAlphaOrLighten(h, color_emg1, overlayAlpha);
             plot(ax_raw1, tsec_raw, filteredSignal1, '-', 'Color', color_emg1, ...
                 'LineWidth',1.1,'DisplayName','EMG1 filtre','Tag','filteredOverlay');
             applyAxisStyle(ax_raw1,'EMG1 brut + filtre', color_emg1, 'Activite (V)');
@@ -1448,7 +1466,7 @@ function f = EMG_GUI_digilent()
                 'DisplayName','EMG1');
             h = plot(ax_raw1, tsec_raw, emg2_raw, '-', 'Color', color_emg2, ...
                 'DisplayName','EMG2 superpose','Tag','comparisonOverlay');
-            setLineAlphaOrLighten(h, color_emg2, alpha_overlay);
+            setLineAlphaOrLighten(h, color_emg2, overlayAlpha);
             applyAxisStyle(ax_raw1,'EMG1 brut', color_emg1, 'Activite (V)');
         end
         set(ax_raw1,'XLim',[tsec_raw(1) tsec_raw(end)]);
@@ -1457,7 +1475,7 @@ function f = EMG_GUI_digilent()
         if strcmp(overlayMode,'raw_filtered')
             h = plot(ax_raw2, tsec_raw, emg2_raw, '-', 'Color', color_emg2, ...
                 'DisplayName','EMG2 brut','Tag','rawOverlay');
-            setLineAlphaOrLighten(h, color_emg2, alpha_overlay);
+            setLineAlphaOrLighten(h, color_emg2, overlayAlpha);
             plot(ax_raw2, tsec_raw, filteredSignal2, '-', 'Color', color_emg2, ...
                 'LineWidth',1.1,'DisplayName','EMG2 filtre','Tag','filteredOverlay');
             applyAxisStyle(ax_raw2,'EMG2 brut + filtre', color_emg2, 'Activite (V)');
@@ -1467,7 +1485,7 @@ function f = EMG_GUI_digilent()
                 'DisplayName','EMG2');
             h = plot(ax_raw2, tsec_raw, emg1_raw, '-', 'Color', color_emg1, ...
                 'DisplayName','EMG1 superpose','Tag','comparisonOverlay');
-            setLineAlphaOrLighten(h, color_emg1, alpha_overlay);
+            setLineAlphaOrLighten(h, color_emg1, overlayAlpha);
             applyAxisStyle(ax_raw2,'EMG2 brut', color_emg2, 'Activite (V)');
         end
         set(ax_raw2,'XLim',[tsec_raw(1) tsec_raw(end)]);
@@ -1478,7 +1496,7 @@ function f = EMG_GUI_digilent()
         if strcmp(overlayMode,'comparison')
             h = plot(ax_filt1, tsec_filt, filt2, '-', 'Color', color_emg2, ...
                 'DisplayName','EMG2 superpose','Tag','comparisonOverlay');
-            setLineAlphaOrLighten(h, color_emg2, alpha_overlay);
+            setLineAlphaOrLighten(h, color_emg2, overlayAlpha);
         end
         styleEnvelopeAxis(ax_filt1, 1, color_emg1);
         set(ax_filt1,'XLim',[tsec_filt(1) tsec_filt(end)]);
@@ -1489,7 +1507,7 @@ function f = EMG_GUI_digilent()
         if strcmp(overlayMode,'comparison')
             h = plot(ax_filt2, tsec_filt, filt1, '-', 'Color', color_emg1, ...
                 'DisplayName','EMG1 superpose','Tag','comparisonOverlay');
-            setLineAlphaOrLighten(h, color_emg1, alpha_overlay);
+            setLineAlphaOrLighten(h, color_emg1, overlayAlpha);
         end
         styleEnvelopeAxis(ax_filt2, 2, color_emg2);
         set(ax_filt2,'XLim',[tsec_filt(1) tsec_filt(end)]);
@@ -1511,9 +1529,9 @@ function f = EMG_GUI_digilent()
         cla(ax_freq); hold(ax_freq,'on');
         if strcmp(overlayMode,'raw_filtered')
             h = plot(ax_freq,freq1,psd1,'-','Color',color_emg1,'DisplayName','EMG1 brut');
-            setLineAlphaOrLighten(h, color_emg1, alpha_overlay);
+            setLineAlphaOrLighten(h, color_emg1, overlayAlpha);
             h = plot(ax_freq,freq2,psd2,'-','Color',color_emg2,'DisplayName','EMG2 brut');
-            setLineAlphaOrLighten(h, color_emg2, alpha_overlay);
+            setLineAlphaOrLighten(h, color_emg2, overlayAlpha);
             [freqFilt1, psdFilt1] = computePowerSpectrum(filteredSignal1, Fs);
             [freqFilt2, psdFilt2] = computePowerSpectrum(filteredSignal2, Fs);
             plot(ax_freq,freqFilt1,psdFilt1,'-','Color',color_emg1, ...

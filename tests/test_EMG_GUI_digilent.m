@@ -219,6 +219,17 @@ function testPostProcessingScaleIncludesBothComparedSignals(testCase)
     testCase.verifyEqual(axRaw1.YLim,axRaw2.YLim,'AbsTol',1e-12);
 end
 
+function testLongTrialMakesOverlayMoreTransparent(testCase)
+    f = testCase.TestData.figure;
+    hooks = getappdata(f,'testHooks');
+
+    alpha10 = hooks.overlayAlphaForDuration(10);
+    alpha30 = hooks.overlayAlphaForDuration(30);
+
+    testCase.verifyLessThan(alpha30,alpha10);
+    testCase.verifyEqual(alpha30,alpha10/3,'AbsTol',1e-12);
+end
+
 function testVideoTimeSelectsNearestFrame(testCase)
     f = testCase.TestData.figure;
     hooks = getappdata(f,'testHooks');

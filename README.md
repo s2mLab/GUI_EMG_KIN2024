@@ -176,7 +176,9 @@ calibration du canal.
 Dans l'application MATLAB, le menu `Apres Stop` propose deux lectures :
 
 - `EMG1 + EMG2` conserve la comparaison des deux signaux, avec le second
-  signal affiche en transparence sur chaque graphique;
+  signal affiche en transparence sur chaque graphique. A partir de `10 s`,
+  cette superposition devient progressivement plus transparente pour garder
+  la courbe principale lisible sur les essais longs;
 - `Brut + filtre` superpose, pour chaque canal, le signal brut transparent et
   le signal passe-bande/notch filtre en volts. Dans ce mode, l'analyse
   frequentielle affiche egalement les spectres filtres des deux canaux.
@@ -260,8 +262,9 @@ continue sans video et un message l'indique.
   **MATLAB Support Package for USB Webcams**.
 - MATLAB : l'acquisition vidéo réellement indépendante de la boucle EMG
   nécessite `Image Acquisition Toolbox` et l'adaptateur `winvideo`.
-- Avec `winvideo`, la video est journalisee par `videoinput` en parallele de
-  la boucle EMG; seul un apercu decime est lu pour l'affichage en direct.
+- Avec `winvideo`, la video est journalisee par `videoinput` en mode
+  `disk&memory` en parallele de la boucle EMG; seul un apercu decime est lu
+  puis retire du tampon memoire pour l'affichage en direct.
   En repli `webcam`, les images sont prises dans la boucle d'interface. La
   protection contre les trous analogiques depend alors de l'activation du
   scan MCC continu.
