@@ -576,8 +576,6 @@ function f = EMG_GUI_digilent()
 
     function captureVideoFrame()
         if strcmp(getappdata(f,'video_backend'),'imaq')
-            if ~getappdata(f,'mcc_continuous_active'), return, end
-            if ~getappdata(f,'video_live_preview_enabled'), return, end
             vid = getappdata(f,'video_input');
             triggerClock = getappdata(f,'video_trigger_clock');
             if isempty(vid) || isempty(triggerClock), return, end
@@ -588,8 +586,11 @@ function f = EMG_GUI_digilent()
                 if available > 0
                     frames = getdata(vid,available);
                     frame = frames(:,:,:,end);
-                    step = max(1,round(getappdata(f,'video_display_decimation')));
-                    showVideoFrame(frame(1:step:end,1:step:end,:));
+                    if getappdata(f,'mcc_continuous_active') && ...
+                            getappdata(f,'video_live_preview_enabled')
+                        step = max(1,round(getappdata(f,'video_display_decimation')));
+                        showVideoFrame(frame(1:step:end,1:step:end,:));
+                    end
                 end
                 setappdata(f,'video_next_capture_time', ...
                     nowTime + 1/max(getappdata(f,'video_playback_target_fps'),1));

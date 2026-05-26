@@ -12,6 +12,8 @@ from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from EMG_GUI_diligent import (
     CHUNK_PTS,
+    COLOR_EMG1,
+    COLOR_EMG2,
     FS,
     MIN_MVC_ENV_V,
     MVC_DUR_SEC,
@@ -20,6 +22,7 @@ from EMG_GUI_diligent import (
     MccBackend,
     SimBackend,
     build_sim_data,
+    overlay_alpha_for_duration,
     process_emg_offline,
     signal_quality_messages,
 )
@@ -152,6 +155,16 @@ class EMGRealtimeWindow(QtWidgets.QMainWindow):
             self.plots[2].plot(pen=pg.mkPen((217, 83, 25, 60), width=1)),
             self.plots[3].plot(pen=pg.mkPen((0, 114, 189, 60), width=1)),
         ]
+        self._set_overlay_alpha(overlay_alpha_for_duration(10))
+
+    def _set_overlay_alpha(self, alpha: float):
+        emg1 = tuple(round(255 * component) for component in COLOR_EMG1)
+        emg2 = tuple(round(255 * component) for component in COLOR_EMG2)
+        opacity = round(255 * alpha)
+        self.raw_overlays[0].setPen(pg.mkPen((*emg2, opacity), width=1))
+        self.raw_overlays[1].setPen(pg.mkPen((*emg1, opacity), width=1))
+        self.env_overlays[0].setPen(pg.mkPen((*emg2, opacity), width=1))
+        self.env_overlays[1].setPen(pg.mkPen((*emg1, opacity), width=1))
 
     def _channels(self):
         first = self.pair.currentIndex()
@@ -410,6 +423,12 @@ class EMGRealtimeWindow(QtWidgets.QMainWindow):
         self.record_btn.setText("Stop")
         self._lock_acquisition_controls(True)
         self._start_video_capture()
+        if not self.test_mode:
+            ch1, ch2 = self._channels()
+            if self.mcc.start_continuous(ch1, ch2, self.fs):
+                self.quality_label.setText("Acquisition MCC continue : apercu video actif.")
+            else:
+                self.quality_label.setText("Scan continu indisponible : risque de trous avec la video.")
         self.timer.start()
 
     def _tick(self):
@@ -437,6 +456,7 @@ class EMGRealtimeWindow(QtWidgets.QMainWindow):
         self.recording = False
         self.record_btn.setText("Enregistrer")
         self._lock_acquisition_controls(False)
+        self.mcc.stop_continuous()
         self._stop_video_capture()
         if not self.full_blocks:
             return
@@ -448,6 +468,7 @@ class EMGRealtimeWindow(QtWidgets.QMainWindow):
 
     def _plot_final(self, raw: np.ndarray):
         t = np.arange(raw.shape[0]) / self.fs
+        self._set_overlay_alpha(overlay_alpha_for_duration(raw.shape[0] / self.fs))
         envelopes = []
         for index in range(2):
             _, env = process_emg_offline(raw[:, index], self.fs)
@@ -490,6 +511,7 @@ class EMGRealtimeWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event):
         self.timer.stop()
+        self.mcc.stop_continuous()
         self._stop_video_capture()
         self._close_video_reader()
         event.accept()

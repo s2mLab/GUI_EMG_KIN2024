@@ -50,7 +50,7 @@ MIN_SPAN_ENV = 5.0              # %MVC
 
 COLOR_EMG1 = (0.0, 0.4470, 0.7410)
 COLOR_EMG2 = (0.8500, 0.3250, 0.0980)
-ALPHA_OVERLAY = 0.18
+ALPHA_OVERLAY = 0.35
 
 # MCC config
 BOARD_NUM = 0
@@ -72,13 +72,18 @@ class MccBackend:
         self._err = None
         try:
             from mcculw import ul
-            from mcculw.enums import ScanOptions, ULRange
+            from mcculw.enums import FunctionType, ScanOptions, ULRange
             self.ul = ul
+            self.FunctionType = FunctionType
             self.ScanOptions = ScanOptions
             self.ULRange = ULRange
             self.ul_range = getattr(ULRange, range_name)
             self.scan_enabled = True
             self.scan_error = None
+            self.continuous_active = False
+            self._continuous_handle = None
+            self._continuous_count = 0
+            self._continuous_read_index = 0
             self._ok = True
         except Exception as e:
             self._ok = False
@@ -127,6 +132,8 @@ class MccBackend:
         return block
 
     def read_block(self, ch1: int, ch2: int, n: int, fs: int) -> np.ndarray:
+        if self.continuous_active:
+            return self.read_continuous_block(n)
         if self.scan_enabled:
             try:
                 return self._read_block_scan(ch1, ch2, n, fs)
@@ -134,6 +141,84 @@ class MccBackend:
                 self.scan_enabled = False
                 self.scan_error = exc
         return self._read_block_single_value(ch1, ch2, n, fs)
+
+    def start_continuous(self, ch1: int, ch2: int, fs: int, buffer_seconds: int = 60) -> bool:
+        """Start a hardware-paced circular analog scan independent of UI/video work."""
+        if not self._ok:
+            return False
+        self.stop_continuous()
+        count = int(fs * 2 * buffer_seconds)
+        memhandle = self.ul.scaled_win_buf_alloc(count)
+        if memhandle == 0:
+            self.scan_error = RuntimeError("Impossible d'allouer le tampon MCC continu.")
+            return False
+        try:
+            options = (self.ScanOptions.SCALEDATA | self.ScanOptions.BACKGROUND |
+                       self.ScanOptions.CONTINUOUS)
+            self.ul.a_in_scan(
+                self.board_num, ch1, ch2, count, fs, self.ul_range, memhandle, options
+            )
+            self._continuous_handle = memhandle
+            self._continuous_count = count
+            self._continuous_read_index = 0
+            self.continuous_active = True
+            return True
+        except Exception as exc:
+            self.scan_error = exc
+            try:
+                self.ul.stop_background(self.board_num, self.FunctionType.AIFUNCTION)
+            except Exception:
+                pass
+            self.ul.win_buf_free(memhandle)
+            return False
+
+    def read_continuous_block(self, n: int, timeout: float = 2.0) -> np.ndarray:
+        required = int(n * 2)
+        deadline = perf_counter() + timeout
+        available = 0
+        while self.continuous_active and perf_counter() < deadline:
+            _status, _count, current_index = self.ul.get_status(
+                self.board_num, self.FunctionType.AIFUNCTION
+            )
+            write_index = (int(current_index) + 1) % self._continuous_count
+            available = (write_index - self._continuous_read_index) % self._continuous_count
+            if available >= required:
+                break
+            time.sleep(0.002)
+        if available < required:
+            raise RuntimeError("Timeout en attente du tampon analogique MCC continu.")
+
+        first_count = min(required, self._continuous_count - self._continuous_read_index)
+        values = (c_double * required)()
+        head = (c_double * first_count)()
+        self.ul.scaled_win_buf_to_array(
+            self._continuous_handle, head, self._continuous_read_index, first_count
+        )
+        for index in range(first_count):
+            values[index] = head[index]
+        if first_count < required:
+            tail_count = required - first_count
+            tail = (c_double * tail_count)()
+            self.ul.scaled_win_buf_to_array(self._continuous_handle, tail, 0, tail_count)
+            for index in range(tail_count):
+                values[first_count + index] = tail[index]
+        self._continuous_read_index = (
+            self._continuous_read_index + required
+        ) % self._continuous_count
+        return np.ctypeslib.as_array(values).copy().reshape(n, 2)
+
+    def stop_continuous(self):
+        if not getattr(self, "continuous_active", False):
+            return
+        try:
+            self.ul.stop_background(self.board_num, self.FunctionType.AIFUNCTION)
+        finally:
+            if self._continuous_handle is not None:
+                self.ul.win_buf_free(self._continuous_handle)
+            self._continuous_handle = None
+            self._continuous_count = 0
+            self._continuous_read_index = 0
+            self.continuous_active = False
 
 
 # =========================
@@ -283,6 +368,14 @@ def process_emg_offline(raw: np.ndarray, fs: int) -> Tuple[np.ndarray, np.ndarra
     kernel = np.ones(win, dtype=float) / win
     envelope = np.sqrt(np.convolve(filtered * filtered, kernel, mode="same"))
     return filtered, envelope
+
+
+def overlay_alpha_for_duration(duration_seconds: float) -> float:
+    """Return a less opaque overlay for long, visually dense recordings."""
+    duration_seconds = max(0.0, float(duration_seconds))
+    if duration_seconds <= 10.0:
+        return ALPHA_OVERLAY
+    return max(0.06, ALPHA_OVERLAY * 10.0 / duration_seconds)
 
 
 class EMGStreamProcessor:
@@ -693,6 +786,7 @@ class EMGApp:
 
     def _on_close(self, _evt):
         self.is_recording = False
+        self.mcc.stop_continuous()
         self._stop_video_capture()
         self._close_video_reader()
 
@@ -781,6 +875,14 @@ class EMGApp:
         if self.test_mode:
             self.sim.reset_record()
         self._start_video_capture()
+        if not self.test_mode:
+            ch1, ch2 = self._selected_channels()
+            if self.mcc.start_continuous(ch1, ch2, self.fs):
+                self.status_text.set_text("Enregistrement en cours - tampon analogique continu actif.")
+            else:
+                self.status_text.set_text(
+                    "Scan continu indisponible : risque de trous avec la video."
+                )
 
         # reset axis view to live mode without clearing widgets
         self._reset_live_view()
@@ -795,6 +897,7 @@ class EMGApp:
         self.btn_rec.label.set_text("Enregistrer")
         self.rec_text.set_text("")
         self._rec_blink = False
+        self.mcc.stop_continuous()
         self._stop_video_capture()
 
         if len(self.full_record) == 0:
@@ -1050,30 +1153,31 @@ class EMGApp:
         mvc1, mvc2 = self.mvc_values
         env1n = 100.0 * env1 / mvc1 if mvc1 > 0 else env1
         env2n = 100.0 * env2 / mvc2 if mvc2 > 0 else env2
+        overlay_alpha = overlay_alpha_for_duration(rawBuf.shape[0] / self.fs)
 
         # Clear axes and draw final with overlays
         for ax in (self.ax_raw1, self.ax_raw2, self.ax_env1, self.ax_env2):
             ax.cla()
 
         self.ax_raw1.plot(t, emg1, color=COLOR_EMG1, lw=1.0)
-        self.ax_raw1.plot(t, emg2, color=COLOR_EMG2, lw=1.0, alpha=ALPHA_OVERLAY)
+        self.ax_raw1.plot(t, emg2, color=COLOR_EMG2, lw=1.0, alpha=overlay_alpha)
         self.ax_raw1.set_title("EMG1 brut", color=COLOR_EMG1)
         self.ax_raw1.set_xlabel("Temps (s)"); self.ax_raw1.set_ylabel("Activité (V)")
         self.ax_raw1.grid(True, alpha=0.25)
 
         self.ax_raw2.plot(t, emg2, color=COLOR_EMG2, lw=1.0)
-        self.ax_raw2.plot(t, emg1, color=COLOR_EMG1, lw=1.0, alpha=ALPHA_OVERLAY)
+        self.ax_raw2.plot(t, emg1, color=COLOR_EMG1, lw=1.0, alpha=overlay_alpha)
         self.ax_raw2.set_title("EMG2 brut", color=COLOR_EMG2)
         self.ax_raw2.set_xlabel("Temps (s)"); self.ax_raw2.set_ylabel("Activité (V)")
         self.ax_raw2.grid(True, alpha=0.25)
 
         self.ax_env1.plot(t, env1n, color=COLOR_EMG1, lw=1.0)
-        self.ax_env1.plot(t, env2n, color=COLOR_EMG2, lw=1.0, alpha=ALPHA_OVERLAY)
+        self.ax_env1.plot(t, env2n, color=COLOR_EMG2, lw=1.0, alpha=overlay_alpha)
         self.ax_env1.set_xlabel("Temps (s)")
         self.ax_env1.grid(True, alpha=0.25)
 
         self.ax_env2.plot(t, env2n, color=COLOR_EMG2, lw=1.0)
-        self.ax_env2.plot(t, env1n, color=COLOR_EMG1, lw=1.0, alpha=ALPHA_OVERLAY)
+        self.ax_env2.plot(t, env1n, color=COLOR_EMG1, lw=1.0, alpha=overlay_alpha)
         self.ax_env2.set_xlabel("Temps (s)")
         self.ax_env2.grid(True, alpha=0.25)
         self._update_envelope_labels()

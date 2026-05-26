@@ -2,7 +2,12 @@ import unittest
 
 import numpy as np
 
-from EMG_GUI_diligent import FS, process_emg_offline, signal_quality_messages
+from EMG_GUI_diligent import (
+    FS,
+    overlay_alpha_for_duration,
+    process_emg_offline,
+    signal_quality_messages,
+)
 
 
 class EMGProcessingTests(unittest.TestCase):
@@ -28,6 +33,13 @@ class EMGProcessingTests(unittest.TestCase):
 
         self.assertTrue(any("saturation" in message for message in messages))
         self.assertIn("EMG2 bruit 60 Hz eleve", messages)
+
+    def test_long_trials_make_comparison_overlay_more_transparent(self):
+        alpha_10 = overlay_alpha_for_duration(10)
+        alpha_30 = overlay_alpha_for_duration(30)
+
+        self.assertLess(alpha_30, alpha_10)
+        self.assertAlmostEqual(alpha_30, alpha_10 / 3)
 
 
 if __name__ == "__main__":

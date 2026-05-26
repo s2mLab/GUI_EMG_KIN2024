@@ -40,6 +40,10 @@ Deux frontends partagent le même traitement et le même accès MCC :
   curseur temporel;
 - affichage en direct par canal, puis superposition des deux courbes après
   l'arrêt de l'enregistrement;
+- acquisition MCC continue avec tampon circulaire de `60 s` pendant les
+  enregistrements materiels, afin que l'affichage video ne coupe pas le signal;
+- transparence des courbes superposees progressivement renforcee pour les
+  essais de plus de `10 s`;
 - export de la figure en PNG et du dernier enregistrement en CSV.
 
 `EMG_GUI_diligent.py` conserve une interface Matplotlib simple. Pour les
