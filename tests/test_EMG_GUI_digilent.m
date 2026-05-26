@@ -186,6 +186,23 @@ function testVideoTimeSelectsNearestFrame(testCase)
     testCase.verifyEqual(slider.Value,3);
 end
 
+function testParallelVideoFrameRateUsesRecordingClockForSynchronization(testCase)
+    f = testCase.TestData.figure;
+    hooks = getappdata(f,'testHooks');
+    slider = findobj(f,'Tag','videoSlider');
+
+    % A camera may produce 464 frames during an actual 17.2 s recording.
+    % They must not be interpreted as 92.6 s because preview is limited to 5 fps.
+    frameTimes = hooks.synchronizeVideoFrameTimes(464,0,17.2);
+    setappdata(f,'video_frame_times',frameTimes);
+    set(slider,'Max',464);
+    hooks.setSliderToTime(slider,17.0);
+
+    testCase.verifyEqual(frameTimes(end),17.2,'AbsTol',1e-12);
+    testCase.verifyGreaterThan(slider.Value,450, ...
+        'Une selection a la fin de l''EMG doit afficher la fin de la video.');
+end
+
 function testAcquisitionTimingDelayAddsActionableWarning(testCase)
     f = testCase.TestData.figure;
     hooks = getappdata(f,'testHooks');

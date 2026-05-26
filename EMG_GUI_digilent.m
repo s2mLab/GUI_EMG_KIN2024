@@ -76,6 +76,7 @@ function f = EMG_GUI_digilent()
     setappdata(f,'video_frame_times',[]);
     setappdata(f,'video_trigger_clock',[]);
     setappdata(f,'video_capture_start_time',0);
+    setappdata(f,'video_capture_stop_time',0);
     setappdata(f,'video_preview_seconds',5);
     setappdata(f,'video_preview_enabled',true);
     setappdata(f,'video_capture_fps',5);
@@ -102,6 +103,7 @@ function f = EMG_GUI_digilent()
         'updateSignalQuality',@(raw,mvc,channels) updateSignalQuality(f,raw,Fs,mvc,channels), ...
         'dependencyReport',@buildDependencyReport, ...
         'setSliderToTime',@setSliderToTime, ...
+        'synchronizeVideoFrameTimes',@synchronizeVideoFrameTimes, ...
         'resetAllAxes',@resetAllAxes, ...
         'updateAcquisitionTiming',@updateAcquisitionTiming));
     connectDAQ();
@@ -446,6 +448,7 @@ function f = EMG_GUI_digilent()
         setappdata(f,'video_frame_times',[]);
         setappdata(f,'video_trigger_clock',[]);
         setappdata(f,'video_capture_start_time',0);
+        setappdata(f,'video_capture_stop_time',0);
         setappdata(f,'video_input',[]);
         setappdata(f,'video_backend','none');
         videoSlider = getappdata(f,'videoSlider');
@@ -619,15 +622,21 @@ function f = EMG_GUI_digilent()
     end
 
     function stopVideoCapture()
+        triggerClock = getappdata(f,'video_trigger_clock');
+        captureStopTime = 0;
+        if ~isempty(triggerClock)
+            captureStopTime = toc(triggerClock);
+        end
+        setappdata(f,'video_capture_stop_time',captureStopTime);
         vid = getappdata(f,'video_input');
         if ~isempty(vid)
             try
                 stop(vid);
                 frameCount = double(vid.FramesAcquired);
-                fps = max(getappdata(f,'video_capture_fps'),1);
                 t0 = getappdata(f,'video_capture_start_time');
                 if frameCount > 0
-                    setappdata(f,'video_frame_times',t0 + (0:frameCount-1)/fps);
+                    frameTimes = synchronizeVideoFrameTimes(frameCount,t0,captureStopTime);
+                    setappdata(f,'video_frame_times',frameTimes);
                 end
                 delete(vid);
             catch ME
@@ -677,9 +686,14 @@ function f = EMG_GUI_digilent()
         frameTimes = getappdata(f,'video_frame_times');
         if isempty(frameTimes), return, end
         frameIndex = max(1,min(frameIndex, numel(frameTimes)));
-        fps = max(getappdata(f,'video_fps'),1);
         signalTime = frameTimes(frameIndex);
-        mediaTime = (frameIndex-1) / fps;
+        reader = getappdata(f,'video_reader');
+        if isempty(reader)
+            reader = VideoReader(filename);
+            setappdata(f,'video_reader',reader);
+        end
+        lastReadableTime = max(0,reader.Duration - 1/max(reader.FrameRate,1));
+        mediaTime = (frameIndex-1) / max(numel(frameTimes)-1,1) * lastReadableTime;
         displayVideoAtTime(mediaTime,signalTime);
         updatePlaybackCursor(signalTime);
     end
@@ -889,6 +903,19 @@ function f = EMG_GUI_digilent()
         if isempty(frameTimes), return, end
         [~,frameIndex] = min(abs(frameTimes - timeSec));
         set(slider,'Value',frameIndex);
+    end
+
+    function frameTimes = synchronizeVideoFrameTimes(frameCount,startTime,stopTime)
+        if frameCount <= 0
+            frameTimes = [];
+        elseif frameCount == 1 || stopTime <= startTime
+            frameTimes = startTime;
+        else
+            % DiskLogger may receive the camera native frame rate even when
+            % playback is intentionally reduced. Use the shared recording
+            % clock, not the requested preview rate, for EMG alignment.
+            frameTimes = linspace(startTime,stopTime,frameCount);
+        end
     end
 
     function updatePlaybackCursor(timeSec)
