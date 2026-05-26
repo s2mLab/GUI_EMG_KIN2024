@@ -268,7 +268,9 @@ continue sans video et un message l'indique.
   nécessite `Image Acquisition Toolbox` et l'adaptateur `winvideo`.
 - Avec `winvideo`, la video est journalisee par `videoinput` en mode
   `disk&memory` en parallele de la boucle EMG; seul un apercu decime est lu
-  puis retire du tampon memoire pour l'affichage en direct.
+  puis retire du tampon memoire pour l'affichage en direct. L'interface force
+  `ReturnedColorSpace='rgb'` afin d'eviter les teintes anormales lorsque la
+  webcam fournit par defaut des trames YUY2/YCbCr.
   En repli `webcam`, les images sont prises dans la boucle d'interface. La
   protection contre les trous analogiques depend alors de l'activation du
   scan MCC continu.

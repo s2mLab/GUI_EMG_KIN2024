@@ -537,6 +537,15 @@ function f = EMG_GUI_digilent()
                 writer = VideoWriter(filename,'Motion JPEG AVI');
                 writer.FrameRate = getappdata(f,'video_capture_fps');
                 vid = videoinput('winvideo',1);
+                try
+                    % Some winvideo formats (for example YUY2) default to
+                    % YCbCr; image() would interpret those bands as RGB.
+                    vid.ReturnedColorSpace = 'rgb';
+                catch MEColor
+                    setStatus('Camera: conversion RGB non disponible; couleurs possibles incorrectes.', ...
+                        [0.75 0.35 0]);
+                    disp(getReport(MEColor,'extended'));
+                end
                 % Keep a bounded memory stream for the live monitor while
                 % DiskLogger independently preserves the complete video.
                 vid.LoggingMode = 'disk&memory';
