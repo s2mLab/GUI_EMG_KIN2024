@@ -50,7 +50,7 @@ MIN_SPAN_ENV = 5.0              # %MVC
 
 COLOR_EMG1 = (0.0, 0.4470, 0.7410)
 COLOR_EMG2 = (0.8500, 0.3250, 0.0980)
-ALPHA_OVERLAY = 0.35
+ALPHA_OVERLAY = 0.12
 
 # MCC config
 BOARD_NUM = 0
@@ -375,7 +375,7 @@ def overlay_alpha_for_duration(duration_seconds: float) -> float:
     duration_seconds = max(0.0, float(duration_seconds))
     if duration_seconds <= 10.0:
         return ALPHA_OVERLAY
-    return max(0.06, ALPHA_OVERLAY * 10.0 / duration_seconds)
+    return max(0.03, ALPHA_OVERLAY * 10.0 / duration_seconds)
 
 
 class EMGStreamProcessor:

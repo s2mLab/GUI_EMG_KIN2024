@@ -180,12 +180,14 @@ calibration du canal.
 Dans l'application MATLAB, le menu `Apres Stop` propose deux lectures :
 
 - `EMG1 + EMG2` conserve la comparaison des deux signaux, avec le second
-  signal affiche en transparence sur chaque graphique. A partir de `10 s`,
-  cette superposition devient progressivement plus transparente pour garder
-  la courbe principale lisible sur les essais longs;
+  signal affiche en transparence forte sur chaque graphique afin de garder
+  le canal principal lisible. A partir de `10 s`, cette superposition devient
+  encore progressivement plus transparente sur les essais longs;
 - `Brut + filtre` superpose, pour chaque canal, le signal brut transparent et
-  le signal passe-bande/notch filtre en volts. Dans ce mode, l'analyse
-  frequentielle affiche egalement les spectres filtres des deux canaux.
+  pointille et le signal passe-bande/notch filtre en volts sur les graphiques
+  du haut. Les graphiques du bas comparent l'enveloppe brute et l'enveloppe
+  filtree. Dans ce mode, l'analyse frequentielle affiche egalement les
+  spectres filtres des deux canaux.
 
 La superposition est volontairement reservee au post-traitement, apres
 `Stop`. Pendant l'acquisition, chaque graphique affiche uniquement son canal

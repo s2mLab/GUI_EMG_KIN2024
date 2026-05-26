@@ -171,6 +171,8 @@ function testRawFilteredModeOverlaysFilteredSignalsAndSpectra(testCase)
 
     testCase.verifyEqual(getappdata(f,'display_overlay_mode'),'raw_filtered');
     testCase.verifyNumElements(findobj(f,'Tag','filteredOverlay'),2);
+    testCase.verifyNumElements(findobj(f,'Tag','rawEnvelopeOverlay'),2);
+    testCase.verifyNumElements(findobj(f,'Tag','filteredEnvelope'),2);
     testCase.verifyNumElements(findobj(f,'Tag','spectrumFiltered'),2);
 end
 
@@ -228,6 +230,8 @@ function testLongTrialMakesOverlayMoreTransparent(testCase)
 
     testCase.verifyLessThan(alpha30,alpha10);
     testCase.verifyEqual(alpha30,alpha10/3,'AbsTol',1e-12);
+    testCase.verifyLessThan(alpha10,hooks.rawFilteredAlphaForDuration(10), ...
+        'La comparaison de deux signaux doit etre plus discrete que brut/filtre.');
 end
 
 function testVideoTimeSelectsNearestFrame(testCase)

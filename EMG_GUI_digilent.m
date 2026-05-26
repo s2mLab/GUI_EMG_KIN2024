@@ -18,7 +18,8 @@ function f = EMG_GUI_digilent()
     %% Colours & constants
     color_emg1 = [0 0.4470 0.7410];
     color_emg2 = [0.8500 0.3250 0.0980];
-    alpha_overlay = 0.35;
+    alpha_overlay = 0.12;
+    alpha_raw_filtered = 0.42;
 
     Fs = 2000;
     boardNum = 0;
@@ -32,6 +33,7 @@ function f = EMG_GUI_digilent()
     setappdata(f,'color_emg1',color_emg1);
     setappdata(f,'color_emg2',color_emg2);
     setappdata(f,'alpha_overlay',alpha_overlay);
+    setappdata(f,'alpha_raw_filtered',alpha_raw_filtered);
 
     setappdata(f,'Fs',Fs);
     setappdata(f,'boardNum',boardNum);
@@ -104,6 +106,7 @@ function f = EMG_GUI_digilent()
         'setSliderToTime',@setSliderToTime, ...
         'synchronizeVideoFrameTimes',@synchronizeVideoFrameTimes, ...
         'overlayAlphaForDuration',@overlayAlphaForDuration, ...
+        'rawFilteredAlphaForDuration',@rawFilteredAlphaForDuration, ...
         'fitLiveYLimits',@fitLiveYLimits, ...
         'resetAllAxes',@resetAllAxes, ...
         'updateAcquisitionTiming',@updateAcquisitionTiming));
@@ -942,7 +945,17 @@ function f = EMG_GUI_digilent()
         else
             % Long recordings draw many points: reduce opacity in inverse
             % proportion to duration so the reference signal remains visible.
-            alpha = max(0.06,baseAlpha * 10 / durationSeconds);
+            alpha = max(0.03,baseAlpha * 10 / durationSeconds);
+        end
+    end
+
+    function alpha = rawFilteredAlphaForDuration(durationSeconds)
+        baseAlpha = getappdata(f,'alpha_raw_filtered');
+        durationSeconds = max(0,double(durationSeconds));
+        if durationSeconds <= 10
+            alpha = baseAlpha;
+        else
+            alpha = max(0.16,baseAlpha * sqrt(10 / durationSeconds));
         end
     end
 
@@ -1443,12 +1456,20 @@ function f = EMG_GUI_digilent()
 
         filteredSignal1 = preprocessEMG(emg1_raw, Fs, getappdata(f,'notch_enabled'));
         filteredSignal2 = preprocessEMG(emg2_raw, Fs, getappdata(f,'notch_enabled'));
+        rawEnvelope1 = sqrt(movmean((emg1_raw - mean(emg1_raw)).^2,100));
+        rawEnvelope2 = sqrt(movmean((emg2_raw - mean(emg2_raw)).^2,100));
         filt1 = filterEMG(emg1_raw, Fs, getappdata(f,'notch_enabled'));
         filt2 = filterEMG(emg2_raw, Fs, getappdata(f,'notch_enabled'));
 
         if ~isempty(mvc)
-            if numel(mvc)>=1 && mvc(1)>0, filt1 = 100*(filt1/mvc(1)); end
-            if numel(mvc)>=2 && mvc(2)>0, filt2 = 100*(filt2/mvc(2)); end
+            if numel(mvc)>=1 && mvc(1)>0
+                filt1 = 100*(filt1/mvc(1));
+                rawEnvelope1 = 100*(rawEnvelope1/mvc(1));
+            end
+            if numel(mvc)>=2 && mvc(2)>0
+                filt2 = 100*(filt2/mvc(2));
+                rawEnvelope2 = 100*(rawEnvelope2/mvc(2));
+            end
         end
 
         tsec_raw  = timeBuf(:)';
@@ -1461,12 +1482,13 @@ function f = EMG_GUI_digilent()
         ax_freq  = getappdata(f,'ax_freq');
         overlayMode = getappdata(f,'display_overlay_mode');
         overlayAlpha = overlayAlphaForDuration(tsec_raw(end)-tsec_raw(1));
+        rawFilteredAlpha = rawFilteredAlphaForDuration(tsec_raw(end)-tsec_raw(1));
 
         cla(ax_raw1); hold(ax_raw1,'on');
         if strcmp(overlayMode,'raw_filtered')
-            h = plot(ax_raw1, tsec_raw, emg1_raw, '-', 'Color', color_emg1, ...
+            h = plot(ax_raw1, tsec_raw, emg1_raw, ':', 'Color', color_emg1, ...
                 'DisplayName','EMG1 brut','Tag','rawOverlay');
-            setLineAlphaOrLighten(h, color_emg1, overlayAlpha);
+            setLineAlphaOrLighten(h, color_emg1, rawFilteredAlpha);
             plot(ax_raw1, tsec_raw, filteredSignal1, '-', 'Color', color_emg1, ...
                 'LineWidth',1.1,'DisplayName','EMG1 filtre','Tag','filteredOverlay');
             applyAxisStyle(ax_raw1,'EMG1 brut + filtre', color_emg1, 'Activite (V)');
@@ -1483,9 +1505,9 @@ function f = EMG_GUI_digilent()
 
         cla(ax_raw2); hold(ax_raw2,'on');
         if strcmp(overlayMode,'raw_filtered')
-            h = plot(ax_raw2, tsec_raw, emg2_raw, '-', 'Color', color_emg2, ...
+            h = plot(ax_raw2, tsec_raw, emg2_raw, ':', 'Color', color_emg2, ...
                 'DisplayName','EMG2 brut','Tag','rawOverlay');
-            setLineAlphaOrLighten(h, color_emg2, overlayAlpha);
+            setLineAlphaOrLighten(h, color_emg2, rawFilteredAlpha);
             plot(ax_raw2, tsec_raw, filteredSignal2, '-', 'Color', color_emg2, ...
                 'LineWidth',1.1,'DisplayName','EMG2 filtre','Tag','filteredOverlay');
             applyAxisStyle(ax_raw2,'EMG2 brut + filtre', color_emg2, 'Activite (V)');
@@ -1501,25 +1523,45 @@ function f = EMG_GUI_digilent()
         set(ax_raw2,'XLim',[tsec_raw(1) tsec_raw(end)]);
 
         cla(ax_filt1); hold(ax_filt1,'on');
-        plot(ax_filt1, tsec_filt, filt1, '-', 'Color', color_emg1, ...
-            'DisplayName','EMG1');
-        if strcmp(overlayMode,'comparison')
+        if strcmp(overlayMode,'raw_filtered')
+            h = plot(ax_filt1, tsec_filt, rawEnvelope1, ':', 'Color', color_emg1, ...
+                'DisplayName','EMG1 enveloppe brute','Tag','rawEnvelopeOverlay');
+            setLineAlphaOrLighten(h, color_emg1, rawFilteredAlpha);
+            plot(ax_filt1, tsec_filt, filt1, '-', 'Color', color_emg1, ...
+                'LineWidth',1.1,'DisplayName','EMG1 enveloppe filtree','Tag','filteredEnvelope');
+        else
+            plot(ax_filt1, tsec_filt, filt1, '-', 'Color', color_emg1, ...
+                'DisplayName','EMG1');
             h = plot(ax_filt1, tsec_filt, filt2, '-', 'Color', color_emg2, ...
                 'DisplayName','EMG2 superpose','Tag','comparisonOverlay');
             setLineAlphaOrLighten(h, color_emg2, overlayAlpha);
         end
         styleEnvelopeAxis(ax_filt1, 1, color_emg1);
+        if strcmp(overlayMode,'raw_filtered')
+            title(ax_filt1,'EMG1 enveloppe brute + filtree','Color',color_emg1);
+            legend(ax_filt1,'show','Location','best');
+        end
         set(ax_filt1,'XLim',[tsec_filt(1) tsec_filt(end)]);
 
         cla(ax_filt2); hold(ax_filt2,'on');
-        plot(ax_filt2, tsec_filt, filt2, '-', 'Color', color_emg2, ...
-            'DisplayName','EMG2');
-        if strcmp(overlayMode,'comparison')
+        if strcmp(overlayMode,'raw_filtered')
+            h = plot(ax_filt2, tsec_filt, rawEnvelope2, ':', 'Color', color_emg2, ...
+                'DisplayName','EMG2 enveloppe brute','Tag','rawEnvelopeOverlay');
+            setLineAlphaOrLighten(h, color_emg2, rawFilteredAlpha);
+            plot(ax_filt2, tsec_filt, filt2, '-', 'Color', color_emg2, ...
+                'LineWidth',1.1,'DisplayName','EMG2 enveloppe filtree','Tag','filteredEnvelope');
+        else
+            plot(ax_filt2, tsec_filt, filt2, '-', 'Color', color_emg2, ...
+                'DisplayName','EMG2');
             h = plot(ax_filt2, tsec_filt, filt1, '-', 'Color', color_emg1, ...
                 'DisplayName','EMG1 superpose','Tag','comparisonOverlay');
             setLineAlphaOrLighten(h, color_emg1, overlayAlpha);
         end
         styleEnvelopeAxis(ax_filt2, 2, color_emg2);
+        if strcmp(overlayMode,'raw_filtered')
+            title(ax_filt2,'EMG2 enveloppe brute + filtree','Color',color_emg2);
+            legend(ax_filt2,'show','Location','best');
+        end
         set(ax_filt2,'XLim',[tsec_filt(1) tsec_filt(end)]);
 
         if strcmp(overlayMode,'comparison')
@@ -1530,8 +1572,8 @@ function f = EMG_GUI_digilent()
         else
             fitLiveYLimits(ax_raw1,[emg1_raw; filteredSignal1]);
             fitLiveYLimits(ax_raw2,[emg2_raw; filteredSignal2]);
-            fitLiveYLimits(ax_filt1,filt1);
-            fitLiveYLimits(ax_filt2,filt2);
+            fitLiveYLimits(ax_filt1,[rawEnvelope1; filt1]);
+            fitLiveYLimits(ax_filt2,[rawEnvelope2; filt2]);
         end
 
         [freq1, psd1] = computePowerSpectrum(emg1_raw, Fs);
@@ -1539,9 +1581,9 @@ function f = EMG_GUI_digilent()
         cla(ax_freq); hold(ax_freq,'on');
         if strcmp(overlayMode,'raw_filtered')
             h = plot(ax_freq,freq1,psd1,'-','Color',color_emg1,'DisplayName','EMG1 brut');
-            setLineAlphaOrLighten(h, color_emg1, overlayAlpha);
+            setLineAlphaOrLighten(h, color_emg1, rawFilteredAlpha);
             h = plot(ax_freq,freq2,psd2,'-','Color',color_emg2,'DisplayName','EMG2 brut');
-            setLineAlphaOrLighten(h, color_emg2, overlayAlpha);
+            setLineAlphaOrLighten(h, color_emg2, rawFilteredAlpha);
             [freqFilt1, psdFilt1] = computePowerSpectrum(filteredSignal1, Fs);
             [freqFilt2, psdFilt2] = computePowerSpectrum(filteredSignal2, Fs);
             plot(ax_freq,freqFilt1,psdFilt1,'-','Color',color_emg1, ...
